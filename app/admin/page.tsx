@@ -38,6 +38,7 @@ interface StudentInfo {
   sectionId?: string;
   phone?: string;
   approved?: boolean;
+  allowBackdatedAttendance?: boolean;
   initialAttendance?: {
     attended: number;
     total: number;
@@ -300,6 +301,7 @@ export default function AdminPage() {
             sectionId: data.sectionId,
             phone: data.phone,
             approved: data.approved,
+            allowBackdatedAttendance: data.allowBackdatedAttendance,
             initialAttendance: data.initialAttendance,
           });
         }
@@ -325,6 +327,7 @@ export default function AdminPage() {
             sectionId: data.sectionId,
             phone: data.phone,
             approved: data.approved,
+            allowBackdatedAttendance: data.allowBackdatedAttendance,
             initialAttendance: data.initialAttendance,
           });
         }
@@ -352,16 +355,33 @@ export default function AdminPage() {
   }, [user]);
 
   // Listen to timetable document (single doc: timetable/CSE-DS with sections MAP)
+  // Also auto-sync section letters to the sections collection
   useEffect(() => {
     if (!user || user.email !== ADMIN_EMAIL) return;
 
     const timetableDocRef = doc(db, "timetable", "CSE-DS");
     const unsubscribe = onSnapshot(
       timetableDocRef,
-      (docSnap) => {
+      async (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
-          setTimetable((data.sections || {}) as FullTimetable);
+          const sectionsMap = data.sections || {};
+          setTimetable(sectionsMap as FullTimetable);
+
+          // Auto-sync: ensure each timetable section letter has a corresponding
+          // document in the "sections" collection (e.g., letter "A" → doc "CSE-DS-A")
+          const sectionLetters = Object.keys(sectionsMap);
+          for (const letter of sectionLetters) {
+            const sectionDocId = `CSE-DS-${letter}`;
+            const sectionRef = doc(db, "sections", sectionDocId);
+            const sectionSnap = await getDoc(sectionRef);
+            if (!sectionSnap.exists()) {
+              await setDoc(sectionRef, {
+                name: `CSE-DS-${letter}`,
+                active: true,
+              });
+            }
+          }
         } else {
           setTimetable({});
         }
@@ -590,6 +610,24 @@ export default function AdminPage() {
     }
   };
 
+  const handleToggleBackdatedAttendance = async (uid: string, currentValue: boolean) => {
+    try {
+      const newValue = !currentValue;
+      await setDoc(doc(db, "users", uid), { allowBackdatedAttendance: newValue }, { merge: true });
+
+      // Log the toggle
+      await addDoc(collection(db, "auditLog"), {
+        action: newValue ? "BACKDATED_ATTENDANCE_ENABLED" : "BACKDATED_ATTENDANCE_DISABLED",
+        studentUid: uid,
+        performedBy: user?.email,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("Error toggling backdated attendance:", error);
+      alert("Error updating backdated attendance permission");
+    }
+  };
+
   const handleAddSection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sectionName.trim()) return;
@@ -640,7 +678,19 @@ export default function AdminPage() {
 
     setIsDeletingUser(true);
     try {
-      // 1. Delete all attendance records for this user
+      // 1. Delete user from Firebase Authentication via server API
+      const idToken = await user!.getIdToken();
+      const authDeleteRes = await fetch("/api/delete-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uid: deleteUserUid, adminToken: idToken }),
+      });
+      const authDeleteData = await authDeleteRes.json();
+      if (!authDeleteRes.ok) {
+        throw new Error(authDeleteData.error || "Failed to delete user from Authentication");
+      }
+
+      // 2. Delete all attendance records for this user
       const datesRef = collection(db, "attendance", deleteUserUid, "dates");
       const datesSnapshot = await getDocs(datesRef);
       const batch = writeBatch(db);
@@ -648,10 +698,10 @@ export default function AdminPage() {
         batch.delete(dateDoc.ref);
       });
 
-      // 2. Delete user document
+      // 3. Delete user document
       batch.delete(doc(db, "users", deleteUserUid));
 
-      // 3. Audit log
+      // 4. Audit log
       const auditRef = doc(collection(db, "auditLog"));
       batch.set(auditRef, {
         action: "USER_DELETED",
@@ -667,7 +717,7 @@ export default function AdminPage() {
 
       setDeleteUserUid(null);
       setDeleteConfirmText("");
-      alert(`User ${student.name || student.email} deleted successfully`);
+      alert(`User ${student.name || student.email} fully deleted (Auth + Firestore)`);
     } catch (error) {
       console.error("Error deleting user:", error);
       alert("Error deleting user: " + error);
@@ -1005,38 +1055,55 @@ export default function AdminPage() {
                     .filter(s => s.approved === true)
                     .map((student) => {
                       const studentSection = student.sectionId ? sections.find(sec => sec.id === student.sectionId) : null;
+                      const hasBackdated = student.allowBackdatedAttendance === true;
                       return (
                       <div
                         key={student.uid}
-                        className="flex items-center justify-between rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-950"
+                        className="rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-950"
                       >
-                        <div className="flex items-center gap-3">
-                          <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                          <div>
-                            <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                              {student.name || student.email}
-                            </p>
-                            {student.regNo && (
-                              <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
-                                {student.regNo}{studentSection ? ` • ${studentSection.name}` : ''}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="h-2 w-2 rounded-full bg-green-500"></div>
+                            <div>
+                              <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
+                                {student.name || student.email}
                               </p>
-                            )}
+                              {student.regNo && (
+                                <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
+                                  {student.regNo}{studentSection ? ` • ${studentSection.name}` : ''}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-green-600 dark:text-green-500">
+                              Approved
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() => {
+                                setDeleteUserUid(student.uid);
+                                setDeleteConfirmText("");
+                              }}
+                              title="Delete user"
+                            >
+                              <UserX className="h-3 w-3" />
+                            </Button>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-semibold text-green-600 dark:text-green-500">
-                            Approved
+                        {/* Backdated attendance toggle */}
+                        <div className="mt-2 flex items-center justify-between pl-5">
+                          <span className="text-xs text-neutral-600 dark:text-neutral-400">
+                            Backdated attendance
                           </span>
                           <Button
                             size="sm"
-                            variant="destructive"
-                            onClick={() => {
-                              setDeleteUserUid(student.uid);
-                              setDeleteConfirmText("");
-                            }}
-                            title="Delete user"
+                            variant={hasBackdated ? "default" : "outline"}
+                            className={`text-xs h-6 px-2 ${hasBackdated ? "bg-amber-600 hover:bg-amber-700 dark:bg-amber-700 dark:hover:bg-amber-800" : ""}`}
+                            onClick={() => handleToggleBackdatedAttendance(student.uid, hasBackdated)}
                           >
-                            <UserX className="h-3 w-3" />
+                            {hasBackdated ? "Enabled" : "Disabled"}
                           </Button>
                         </div>
                       </div>

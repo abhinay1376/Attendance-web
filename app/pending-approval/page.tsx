@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
+import { doc, onSnapshot, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL } from "@/lib/constants";
@@ -44,15 +44,20 @@ export default function PendingApprovalPage() {
     }
   }, [user, loading, router]);
 
-  // Load user data
+  // Load user data and listen for approval changes (auto-redirect)
   useEffect(() => {
     if (!user || user.email === ADMIN_EMAIL) return;
 
-    const loadUserData = async () => {
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (userDoc.exists()) {
-        const data = userDoc.data() as UserData;
+    const unsubscribe = onSnapshot(doc(db, "users", user.uid), async (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data() as UserData;
         setUserData(data);
+
+        // Auto-redirect when approved
+        if (data.approved === true) {
+          router.push("/student");
+          return;
+        }
 
         // Load section name if sectionId exists
         if (data.sectionId) {
@@ -62,10 +67,10 @@ export default function PendingApprovalPage() {
           }
         }
       }
-    };
+    });
 
-    loadUserData();
-  }, [user]);
+    return () => unsubscribe();
+  }, [user, router]);
 
   const handleSignOut = async () => {
     try {

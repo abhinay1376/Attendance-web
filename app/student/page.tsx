@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { collection, onSnapshot, doc, setDoc, getDoc, getDocs } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL } from "@/lib/constants";
@@ -12,7 +12,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { AnimatedCard } from "@/components/ui/animated-card";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PageTransition } from "@/components/page-transition";
 import { CalendarIcon, Info } from "lucide-react";
@@ -36,11 +35,6 @@ interface InitialAttendance {
   uptoDate: string;
 }
 
-interface Holiday {
-  date: string;
-  reason: string;
-}
-
 // ─── NEW TIMETABLE SCHEMA ───
 interface TimetableSlot {
   subject: string;
@@ -48,6 +42,8 @@ interface TimetableSlot {
   end: string;      // HH:mm
   classCount: number;
 }
+
+type SectionTimetable = Record<string, TimetableSlot[]>; // day → slots
 
 // Map section Firestore doc IDs to timetable section letters
 function sectionNameToLetter(sectionName: string): string {
@@ -59,7 +55,8 @@ export default function StudentPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
 
-  const [todaySlots, setTodaySlots] = useState<TimetableSlot[]>([]);
+  const [sectionTimetable, setSectionTimetable] = useState<SectionTimetable>({});
+  const [slotsForDate, setSlotsForDate] = useState<TimetableSlot[]>([]);
   const [attendance, setAttendance] = useState<PeriodAttendance>({});
   const [submitting, setSubmitting] = useState<{ [key: string]: boolean }>({});
   const [initialAttendance, setInitialAttendance] = useState<InitialAttendance | null>(null);
@@ -69,13 +66,12 @@ export default function StudentPage() {
   const [holidays, setHolidays] = useState<Set<string>>(new Set());
   const [holidayReasons, setHolidayReasons] = useState<Map<string, string>>(new Map());
   const [isApproved, setIsApproved] = useState<boolean>(false);
-  const [userSection, setUserSection] = useState<string>("");
   const [sectionLetter, setSectionLetter] = useState<string>("");
+  const [pageLoading, setPageLoading] = useState(true);
 
   const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
   const today = format(new Date(), "yyyy-MM-dd");
-  const todayDate = new Date();
-  const dayOfWeek = format(todayDate, "EEEE"); // Monday, Tuesday, etc.
+  const isToday = selectedDateStr === today;
 
   useEffect(() => {
     if (!loading) {
@@ -87,81 +83,54 @@ export default function StudentPage() {
     }
   }, [user, loading, router]);
 
-  // Check approval and section
+  // Check approval, section, backdated permission, and initial attendance (real-time)
   useEffect(() => {
     if (!user || user.email === ADMIN_EMAIL) return;
 
-    const checkUserStatus = async () => {
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (userDoc.exists()) {
-        const data = userDoc.data();
-        
-        // Check section - should always exist for new registrations
-        if (!data.sectionId) {
-          console.error("User has no section assigned");
-          router.push("/pending-approval");
-          return;
-        }
-        
-        setUserSection(data.sectionId);
-
-        // Resolve section letter from sections collection
-        const sectionDoc = await getDoc(doc(db, "sections", data.sectionId));
-        if (sectionDoc.exists()) {
-          const secName = sectionDoc.data().name || "";
-          setSectionLetter(sectionNameToLetter(secName));
-        }
-        
-        const approved = data.approved === true;
-        setIsApproved(approved);
-        if (!approved) {
-          router.push("/pending-approval");
-        }
-      } else {
-        console.error("User document not found");
+    const unsubscribe = onSnapshot(doc(db, "users", user.uid), async (docSnap) => {
+      if (!docSnap.exists()) {
         router.push("/pending-approval");
+        return;
       }
-    };
 
-    checkUserStatus();
-  }, [user, router]);
+      const data = docSnap.data();
 
-  // Load initial attendance
-  useEffect(() => {
-    if (!user || user.email === ADMIN_EMAIL) return;
-
-    const loadInitialAttendance = async () => {
-      const userDoc = await getDoc(doc(db, "users", user.uid));
-      if (userDoc.exists()) {
-        const data = userDoc.data();
-        if (data.initialAttendance) {
-          setInitialAttendance(data.initialAttendance);
-        }
+      if (!data.sectionId) {
+        console.warn("User has no section assigned");
+        router.push("/pending-approval");
+        return;
       }
-    };
 
-    loadInitialAttendance();
+      const approved = data.approved === true;
+      setIsApproved(approved);
 
-    const unsubscribe = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.initialAttendance) {
-          setInitialAttendance(data.initialAttendance);
-        }
+      if (!approved) {
+        router.push("/pending-approval");
+        return;
       }
+
+      if (data.initialAttendance) {
+        setInitialAttendance(data.initialAttendance);
+      }
+
+      // Resolve section letter from sections collection
+      const sectionDoc = await getDoc(doc(db, "sections", data.sectionId));
+      if (sectionDoc.exists()) {
+        const secName = sectionDoc.data().name || "";
+        setSectionLetter(sectionNameToLetter(secName));
+      }
+
+      setPageLoading(false);
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, router]);
 
-  // Calculate app-based attendance
+  // Calculate app-based attendance (real-time)
   useEffect(() => {
     if (!user || user.email === ADMIN_EMAIL) return;
 
-    const calculateAppAttendance = async () => {
-      const attendanceRef = collection(db, "attendance", user.uid, "dates");
-      const snapshot = await getDocs(attendanceRef);
-      
+    const unsubscribe = onSnapshot(collection(db, "attendance", user.uid, "dates"), (snapshot) => {
       let attended = 0;
       let total = 0;
 
@@ -178,19 +147,12 @@ export default function StudentPage() {
 
       setAppAttended(attended);
       setAppTotal(total);
-    };
-
-    calculateAppAttendance();
-
-    // Listen for changes
-    const unsubscribe = onSnapshot(collection(db, "attendance", user.uid, "dates"), () => {
-      calculateAppAttendance();
     });
 
     return () => unsubscribe();
   }, [user]);
 
-  // Listen to timetable from Firestore doc (timetable/CSE-DS -> sections MAP)
+  // Listen to full section timetable from Firestore doc
   useEffect(() => {
     if (!user || user.email === ADMIN_EMAIL || !sectionLetter) return;
 
@@ -199,18 +161,23 @@ export default function StudentPage() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         const sections = data.sections || {};
-        const sectionData = sections[sectionLetter] || {};
-        const dayKey = format(todayDate, "EEEE").toLowerCase(); // "monday", "tuesday", etc.
-        const slots: TimetableSlot[] = (sectionData[dayKey] || [])
-          .sort((a: TimetableSlot, b: TimetableSlot) => a.start.localeCompare(b.start));
-        setTodaySlots(slots);
+        const sectionData: SectionTimetable = sections[sectionLetter] || {};
+        setSectionTimetable(sectionData);
       } else {
-        setTodaySlots([]);
+        setSectionTimetable({});
       }
     });
 
     return () => unsubscribe();
   }, [user, sectionLetter]);
+
+  // Derive slots for selected date from stored timetable
+  useEffect(() => {
+    const dayKey = format(selectedDate, "EEEE").toLowerCase();
+    const slots: TimetableSlot[] = (sectionTimetable[dayKey] || [])
+      .sort((a: TimetableSlot, b: TimetableSlot) => a.start.localeCompare(b.start));
+    setSlotsForDate(slots);
+  }, [selectedDate, sectionTimetable]);
 
   // Listen to holidays collection
   useEffect(() => {
@@ -258,9 +225,13 @@ export default function StudentPage() {
   const handleMarkAttendance = async (slotKey: string, slot: TimetableSlot, status: "PRESENT" | "ABSENT") => {
     if (!user) return;
 
-    // Check if already submitted for this slot today
-    if (attendance[slotKey]) {
-      alert("You have already marked attendance for this period.");
+    // Validate date
+    if (selectedDateStr > today) {
+      alert("Cannot mark attendance for future dates.");
+      return;
+    }
+    if (holidays.has(selectedDateStr)) {
+      alert("Cannot mark attendance on a holiday.");
       return;
     }
 
@@ -291,7 +262,7 @@ export default function StudentPage() {
     }
   };
 
-  if (loading) {
+  if (loading || pageLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <LoadingSpinner size="lg" />
@@ -311,31 +282,27 @@ export default function StudentPage() {
     );
   }
 
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString("en-US", {
-      weekday: "long",
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-  };
-
   // Date validation
   const cutoffDate = initialAttendance ? new Date(initialAttendance.uptoDate) : null;
   const isDateDisabled = (date: Date) => {
     const dateStr = format(date, "yyyy-MM-dd");
-    // Disable future dates
+    // Future dates always disabled
     if (dateStr > today) return true;
-    // Disable dates on or before cutoff date
+    // Dates on or before cutoff disabled
     if (cutoffDate && dateStr <= format(cutoffDate, "yyyy-MM-dd")) return true;
-    // Disable holidays
+    // Holidays disabled
     if (holidays.has(dateStr)) return true;
+    // Sundays disabled
+    if (date.getDay() === 0) return true;
     return false;
   };
 
   const isSelectedDateValid = !isDateDisabled(selectedDate);
   const isHoliday = holidays.has(selectedDateStr);
+  const isSunday = selectedDate.getDay() === 0;
+  const isPastDate = selectedDateStr < today;
+  const isFutureDate = selectedDateStr > today;
+  const selectedDayName = format(selectedDate, "EEEE");
 
   // ─── UNIFIED ATTENDANCE FORMULA ───
   // totalAttended = initialAttendedClasses + appAttendedClasses
@@ -464,14 +431,14 @@ export default function StudentPage() {
                     <Button
                       id="date-picker"
                       variant="outline"
-                      className="w-full justify-start text-left font-normal sm:w-[320px] h-11 px-4"
+                      className="justify-start text-left font-normal w-fit h-9 px-3 text-sm"
                       aria-label="Select attendance date"
                     >
-                      <CalendarIcon className="mr-2 h-5 w-5" />
-                      <span className="text-base">{format(selectedDate, "EEEE, MMMM d, yyyy")}</span>
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {format(selectedDate, "EEE, MMM d, yyyy")}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start">
+                  <PopoverContent className="w-auto p-0" align="start" sideOffset={8}>
                     <Calendar
                       mode="single"
                       selected={selectedDate}
@@ -482,17 +449,23 @@ export default function StudentPage() {
                       }}
                       disabled={isDateDisabled}
                       initialFocus
-                      className="rounded-md"
+                      className="rounded-md border-0 [--cell-size:36px]"
                     />
                   </PopoverContent>
                 </Popover>
-                <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                  {selectedDateStr === today 
-                    ? "Today's attendance" 
-                    : selectedDateStr > today 
-                    ? "Future date selected"
-                    : "Past date selected"}
-                </p>
+
+                {/* Date status badge */}
+                <div className="flex items-center gap-2">
+                  {isToday ? (
+                    <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">
+                      Today&apos;s attendance
+                    </span>
+                  ) : isPastDate ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
+                      Attendance for {format(selectedDate, "MMM d, yyyy")}
+                    </span>
+                  ) : null}
+                </div>
               </div>
 
               {/* Error message for invalid dates */}
@@ -500,13 +473,15 @@ export default function StudentPage() {
                 <Alert variant="destructive">
                   <Info className="h-4 w-4" />
                   <AlertDescription className="ml-7">
-                    {selectedDateStr > today
-                      ? "You cannot mark attendance for future dates. Please select today or a previous date."
+                    {isFutureDate
+                      ? "You cannot mark attendance for future dates."
                       : isHoliday
-                      ? `This day is marked as a holiday by admin. Reason: ${holidayReasons.get(selectedDateStr) || "Holiday"}`
+                      ? `This day is marked as a holiday. Reason: ${holidayReasons.get(selectedDateStr) || "Holiday"}`
+                      : isSunday
+                      ? "Sundays are not valid for attendance."
                       : cutoffDate && selectedDateStr <= format(cutoffDate, "yyyy-MM-dd")
-                      ? `This date is before the cutoff date (${format(cutoffDate, "MMMM d, yyyy")}). Attendance for this period has already been counted and cannot be modified.`
-                      : "The selected date is not valid for attendance entry."}
+                      ? `This date is before the cutoff date (${format(cutoffDate, "MMMM d, yyyy")}). Attendance is already counted.`
+                      : "The selected date is not valid for attendance."}
                   </AlertDescription>
                 </Alert>
               )}
@@ -514,184 +489,182 @@ export default function StudentPage() {
           </CardContent>
         </Card>
 
-        {/* Period Cards - Show only if today and valid */}
+        {/* Period Cards */}
         <div>
           <h2 className="text-xl font-semibold mb-4">
-            {selectedDateStr === today 
-              ? `Today's Classes (${dayOfWeek})`
-              : `Classes for ${format(selectedDate, "MMMM d, yyyy")}`}
+            {isToday
+              ? `Today's Classes (${selectedDayName})`
+              : `Classes for ${format(selectedDate, "MMMM d, yyyy")} (${selectedDayName})`}
           </h2>
-          
+
+
+
           {!isSelectedDateValid ? (
             <Card>
               <CardContent className="py-12 text-center">
                 <Info className="mx-auto h-12 w-12 text-neutral-400 dark:text-neutral-600 mb-4" />
                 <p className="text-base font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-                  Invalid Date Selected
+                  Cannot Mark Attendance
                 </p>
                 <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                  Please select a valid date from the calendar above to mark your attendance.
+                  Please select a valid date from the calendar above.
                 </p>
               </CardContent>
             </Card>
-          ) : selectedDateStr !== today ? (
+          ) : slotsForDate.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center">
                 <Info className="mx-auto h-12 w-12 text-neutral-400 dark:text-neutral-600 mb-4" />
                 <p className="text-base font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-                  Only Today's Attendance
+                  No Classes Scheduled
                 </p>
                 <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                  You can only mark attendance for today. Please select today's date.
+                  Your timetable shows no classes for {selectedDayName}.
                 </p>
               </CardContent>
             </Card>
-          ) : (() => {
-              if (todaySlots.length === 0) {
+          ) : (
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {slotsForDate.map((slot, index) => {
+                const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
+                const isSubmitted = !!attendance[slotKey];
+                const record = attendance[slotKey];
+                const fadeClass = index === 0 ? 'animate-fade-in'
+                  : index === 1 ? 'animate-fade-in-delay-1'
+                  : index === 2 ? 'animate-fade-in-delay-2'
+                  : index === 3 ? 'animate-fade-in-delay-3'
+                  : index === 4 ? 'animate-fade-in-delay-4'
+                  : 'animate-fade-in-delay-5';
+
                 return (
-                  <Card>
-                    <CardContent className="py-12 text-center">
-                      <Info className="mx-auto h-12 w-12 text-neutral-400 dark:text-neutral-600 mb-4" />
-                      <p className="text-base font-medium text-neutral-700 dark:text-neutral-300 mb-2">
-                        No Classes Today
-                      </p>
-                      <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                        Your timetable shows no classes scheduled for {dayOfWeek}.
-                      </p>
-                    </CardContent>
-                  </Card>
+                  <div key={slotKey} className={fadeClass}>
+                    <Card elevation={3}>
+                      <CardHeader>
+                        <CardTitle className="text-lg">
+                          {slot.start} – {slot.end}
+                          <span className="ml-2 text-sm font-normal text-blue-600 dark:text-blue-400">
+                            ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
+                          </span>
+                        </CardTitle>
+                        <AnimatePresence mode="wait">
+                          {isSubmitted && (
+                            <motion.div
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              transition={{ duration: 0.2 }}
+                            >
+                              <CardDescription>
+                                Marked as{" "}
+                                <span
+                                  className={
+                                    record.status === "PRESENT"
+                                      ? "font-semibold text-green-600 dark:text-green-400"
+                                      : "font-semibold text-red-600 dark:text-red-400"
+                                  }
+                                >
+                                  {record.status}
+                                </span>
+                              </CardDescription>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <AnimatePresence mode="wait">
+                          {isSubmitted ? (
+                            <motion.div
+                              key="submitted"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              transition={{ duration: 0.2 }}
+                              className="space-y-3"
+                            >
+                              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                                Subject:{" "}
+                                <span className="font-medium text-neutral-900 dark:text-neutral-50">
+                                  {slot.subject}
+                                </span>
+                              </p>
+                              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                                Submitted at {new Date(record.timestamp).toLocaleTimeString()}
+                              </p>
+                              <div className="flex gap-2 pt-1">
+                                <Button
+                                  size="sm"
+                                  variant={record.status === "PRESENT" ? "outline" : "default"}
+                                  className={record.status !== "PRESENT" ? "bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800" : ""}
+                                  onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
+                                  disabled={submitting[slotKey] || record.status === "PRESENT"}
+                                >
+                                  {submitting[slotKey] ? <LoadingSpinner size="sm" /> : "Present"}
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant={record.status === "ABSENT" ? "outline" : "default"}
+                                  className={record.status !== "ABSENT" ? "bg-red-600 hover:bg-red-700 text-white dark:bg-red-700 dark:hover:bg-red-800" : ""}
+                                  onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
+                                  disabled={submitting[slotKey] || record.status === "ABSENT"}
+                                >
+                                  {submitting[slotKey] ? <LoadingSpinner size="sm" /> : "Absent"}
+                                </Button>
+                              </div>
+                            </motion.div>
+                          ) : (
+                            <motion.div
+                              key="form"
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              transition={{ duration: 0.2 }}
+                              className="space-y-4"
+                            >
+                              <div className="space-y-2">
+                                <p className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                                  Subject
+                                </p>
+                                <p className="text-sm text-neutral-900 dark:text-neutral-50 font-medium">
+                                  {slot.subject}
+                                </p>
+                              </div>
+
+                              <div className="flex gap-2">
+                                <Button
+                                  className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[44px] dark:bg-green-700 dark:hover:bg-green-800"
+                                  onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
+                                  disabled={submitting[slotKey]}
+                                  aria-label={`Mark present for ${slot.start}–${slot.end}`}
+                                >
+                                  {submitting[slotKey] ? (
+                                    <LoadingSpinner size="sm" />
+                                  ) : (
+                                    "Present"
+                                  )}
+                                </Button>
+                                <Button
+                                  className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[44px] dark:bg-red-700 dark:hover:bg-red-800"
+                                  onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
+                                  disabled={submitting[slotKey]}
+                                  aria-label={`Mark absent for ${slot.start}–${slot.end}`}
+                                >
+                                  {submitting[slotKey] ? (
+                                    <LoadingSpinner size="sm" />
+                                  ) : (
+                                    "Absent"
+                                  )}
+                                </Button>
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </CardContent>
+                    </Card>
+                  </div>
                 );
-              }
-
-              return (
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {todaySlots.map((slot, index) => {
-                    // Create a stable key for each slot: "subject_start_end"
-                    const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
-                    const isSubmitted = !!attendance[slotKey];
-                    const record = attendance[slotKey];
-                    const fadeClass = index === 0 ? 'animate-fade-in'
-                      : index === 1 ? 'animate-fade-in-delay-1'
-                      : index === 2 ? 'animate-fade-in-delay-2'
-                      : index === 3 ? 'animate-fade-in-delay-3'
-                      : index === 4 ? 'animate-fade-in-delay-4'
-                      : 'animate-fade-in-delay-5';
-
-                    return (
-                      <div
-                        key={slotKey}
-                        className={fadeClass}
-                      >
-                        <Card 
-                          elevation={3}
-                        >
-                          <CardHeader>
-                            <CardTitle className="text-lg">
-                              {slot.start} – {slot.end}
-                              <span className="ml-2 text-sm font-normal text-blue-600 dark:text-blue-400">
-                                ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
-                              </span>
-                            </CardTitle>
-                            <AnimatePresence mode="wait">
-                              {isSubmitted && (
-                                <motion.div
-                                  initial={{ opacity: 0 }}
-                                  animate={{ opacity: 1 }}
-                                  exit={{ opacity: 0 }}
-                                  transition={{ duration: 0.2 }}
-                                >
-                                  <CardDescription>
-                                    Marked as{" "}
-                                    <span
-                                      className={
-                                        record.status === "PRESENT"
-                                          ? "font-semibold text-green-600 dark:text-green-400"
-                                          : "font-semibold text-red-600 dark:text-red-400"
-                                      }
-                                    >
-                                      {record.status}
-                                    </span>
-                                  </CardDescription>
-                                </motion.div>
-                              )}
-                            </AnimatePresence>
-                          </CardHeader>
-                          <CardContent className="space-y-4">
-                            <AnimatePresence mode="wait">
-                              {isSubmitted ? (
-                                <motion.div
-                                  key="submitted"
-                                  initial={{ opacity: 0 }}
-                                  animate={{ opacity: 1 }}
-                                  exit={{ opacity: 0 }}
-                                  transition={{ duration: 0.2 }}
-                                  className="space-y-2"
-                                >
-                                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                                    Subject:{" "}
-                                    <span className="font-medium text-neutral-900 dark:text-neutral-50">
-                                      {slot.subject}
-                                    </span>
-                                  </p>
-                                  <p className="text-xs text-neutral-500 dark:text-neutral-400">
-                                    Submitted at {new Date(record.timestamp).toLocaleTimeString()}
-                                  </p>
-                                </motion.div>
-                              ) : (
-                                <motion.div
-                                  key="form"
-                                  initial={{ opacity: 0 }}
-                                  animate={{ opacity: 1 }}
-                                  exit={{ opacity: 0 }}
-                                  transition={{ duration: 0.2 }}
-                                  className="space-y-4"
-                                >
-                                  <div className="space-y-2">
-                                    <p className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                                      Subject
-                                    </p>
-                                    <p className="text-sm text-neutral-900 dark:text-neutral-50 font-medium">
-                                      {slot.subject}
-                                    </p>
-                                  </div>
-
-                                  <div className="flex gap-2">
-                                    <Button
-                                      className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[44px] dark:bg-green-700 dark:hover:bg-green-800"
-                                      onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
-                                      disabled={submitting[slotKey]}
-                                      aria-label={`Mark present for ${slot.start}–${slot.end}`}
-                                    >
-                                      {submitting[slotKey] ? (
-                                        <LoadingSpinner size="sm" />
-                                      ) : (
-                                        "Present"
-                                      )}
-                                    </Button>
-                                    <Button
-                                      className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[44px] dark:bg-red-700 dark:hover:bg-red-800"
-                                      onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
-                                      disabled={submitting[slotKey]}
-                                      aria-label={`Mark absent for ${slot.start}–${slot.end}`}
-                                    >
-                                      {submitting[slotKey] ? (
-                                        <LoadingSpinner size="sm" />
-                                      ) : (
-                                        "Absent"
-                                      )}
-                                    </Button>
-                                  </div>
-                                </motion.div>
-                              )}
-                            </AnimatePresence>
-                          </CardContent>
-                        </Card>
-                      </div>
-                    );
-                  })}
+              })}
                 </div>
-              );
-            })()}
+              )}
           </div>
         </div>
       </div>

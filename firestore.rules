@@ -50,10 +50,10 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Sections collection
+    // Sections collection (public read so register page can list them)
     match /sections/{sectionId} {
-      // Anyone authenticated can read sections
-      allow read: if request.auth != null;
+      // Anyone can read sections (needed for registration dropdown)
+      allow read: if true;
       
       // Only admin can write sections
       allow write: if isAdmin();

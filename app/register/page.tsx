@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
 import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc, collection, onSnapshot, query, where, getDocs } from "firebase/firestore";
+import { doc, setDoc, collection, onSnapshot, query, where } from "firebase/firestore";
 import { motion } from "framer-motion";
 
 import { auth, db } from "@/lib/firebase";
@@ -82,16 +82,38 @@ export default function RegisterPage() {
         return;
       }
 
-      // Check if registration number is unique
-      const regNoQuery = query(collection(db, "users"), where("regNo", "==", regNo.toLowerCase()));
-      const regNoSnapshot = await getDocs(regNoQuery);
-      if (!regNoSnapshot.empty) {
-        setError("Registration number already exists");
+      // Check registration number and phone uniqueness via server API
+      setIsLoading(true);
+      try {
+        const checkRes = await fetch("/api/check-regno", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ regNo: regNo.toLowerCase(), phone }),
+        });
+        const checkData = await checkRes.json();
+        if (!checkRes.ok) {
+          setError("Unable to verify details. Please try again.");
+          setIsLoading(false);
+          return;
+        }
+        if (checkData.regNoExists) {
+          setError("Registration number already exists");
+          setIsLoading(false);
+          return;
+        }
+        if (checkData.phoneExists) {
+          setError("Phone number already registered");
+          setIsLoading(false);
+          return;
+        }
+      } catch {
+        setError("Network error. Please check your connection and try again.");
+        setIsLoading(false);
         return;
       }
+    } else {
+      setIsLoading(true);
     }
-
-    setIsLoading(true);
 
     try {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
@@ -113,13 +135,23 @@ export default function RegisterPage() {
           sectionId: sectionId,
           phone: phone,
           approved: false,
+          allowBackdatedAttendance: false,
           createdAt: Date.now(),
         });
         router.push("/pending-approval");
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Unable to create account.";
-      setError(message);
+      const firebaseMessage = err instanceof Error ? err.message : "Unable to create account.";
+      // Map Firebase error codes to user-friendly messages
+      if (firebaseMessage.includes("email-already-in-use")) {
+        setError("This email is already registered. Please sign in instead.");
+      } else if (firebaseMessage.includes("weak-password")) {
+        setError("Password must be at least 6 characters.");
+      } else if (firebaseMessage.includes("invalid-email")) {
+        setError("Please enter a valid email address.");
+      } else {
+        setError(firebaseMessage);
+      }
     } finally {
       setIsLoading(false);
     }

@@ -281,33 +281,31 @@
   }
 }
 
-/* Enhanced calendar styles for better mobile usability and accessibility */
+/* Enhanced calendar styles for better usability and accessibility */
 @layer components {
-  /* Larger touch targets for mobile calendar */
-  [data-slot="calendar"] button {
-    min-height: 44px;
-    min-width: 44px;
+  /* Touch-friendly day buttons without breaking the grid */
+  [data-slot="calendar"] {
     touch-action: manipulation;
   }
-  
+
   /* Better focus states for keyboard navigation */
   [data-slot="calendar"] button:focus-visible {
     outline: 2px solid var(--ring);
-    outline-offset: 2px;
+    outline-offset: 1px;
   }
-  
+
   /* Disabled date styling */
   [data-slot="calendar"] button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
   }
-  
-  /* Popover improvements for mobile */
+
+  /* Popover improvements */
   [data-slot="popover-content"] {
     max-height: 90vh;
     overflow: auto;
   }
-  
+
   /* Only transition specific properties to avoid subpixel blur */
   [data-slot="calendar"] button,
   [data-slot="popover-content"] {
