@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { collection, onSnapshot, doc, setDoc, getDoc, getDocs, query, where } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, getDoc, getDocs } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL } from "@/lib/constants";
@@ -19,25 +19,15 @@ import { CalendarIcon, Info } from "lucide-react";
 import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 
-interface Subject {
-  id: string;
-  name: string;
-}
-
-interface Period {
-  id: string;
-  label: string;
-}
-
 interface AttendanceRecord {
-  subjectId: string;
+  subjectId: string;   // now stores subject NAME (e.g. "DBMS")
   status: "PRESENT" | "ABSENT";
   timestamp: number;
-  classCount: number; // Number of classes for this period
+  classCount: number;
 }
 
 interface PeriodAttendance {
-  [periodId: string]: AttendanceRecord;
+  [entryKey: string]: AttendanceRecord;
 }
 
 interface InitialAttendance {
@@ -51,25 +41,27 @@ interface Holiday {
   reason: string;
 }
 
-interface TimetableEntry {
-  id: string;
-  sectionId: string;
-  day: string;
-  subjectId: string;
-  startTime: string;
-  endTime: string;
-  order: number;
-  classCount: number; // Number of classes based on duration (1 class = 50 mins)
+// ─── NEW TIMETABLE SCHEMA ───
+interface TimetableSlot {
+  subject: string;
+  start: string;   // HH:mm
+  end: string;      // HH:mm
+  classCount: number;
+}
+
+// Map section Firestore doc IDs to timetable section letters
+function sectionNameToLetter(sectionName: string): string {
+  const parts = sectionName.split("-");
+  return parts[parts.length - 1].toUpperCase();
 }
 
 export default function StudentPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
 
-  const [subjects, setSubjects] = useState<Subject[]>([]);
-  const [timetable, setTimetable] = useState<TimetableEntry[]>([]);
+  const [todaySlots, setTodaySlots] = useState<TimetableSlot[]>([]);
   const [attendance, setAttendance] = useState<PeriodAttendance>({});
-  const [submitting, setSubmitting] = useState<{ [periodId: string]: boolean }>({});
+  const [submitting, setSubmitting] = useState<{ [key: string]: boolean }>({});
   const [initialAttendance, setInitialAttendance] = useState<InitialAttendance | null>(null);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [appAttended, setAppAttended] = useState(0);
@@ -78,6 +70,7 @@ export default function StudentPage() {
   const [holidayReasons, setHolidayReasons] = useState<Map<string, string>>(new Map());
   const [isApproved, setIsApproved] = useState<boolean>(false);
   const [userSection, setUserSection] = useState<string>("");
+  const [sectionLetter, setSectionLetter] = useState<string>("");
 
   const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
   const today = format(new Date(), "yyyy-MM-dd");
@@ -111,6 +104,13 @@ export default function StudentPage() {
         }
         
         setUserSection(data.sectionId);
+
+        // Resolve section letter from sections collection
+        const sectionDoc = await getDoc(doc(db, "sections", data.sectionId));
+        if (sectionDoc.exists()) {
+          const secName = sectionDoc.data().name || "";
+          setSectionLetter(sectionNameToLetter(secName));
+        }
         
         const approved = data.approved === true;
         setIsApproved(approved);
@@ -168,9 +168,10 @@ export default function StudentPage() {
       snapshot.forEach((doc) => {
         const data = doc.data() as PeriodAttendance;
         Object.values(data).forEach((record) => {
-          total++;
+          const count = record.classCount || 1;
+          total += count;
           if (record.status === "PRESENT") {
-            attended++;
+            attended += count;
           }
         });
       });
@@ -189,40 +190,27 @@ export default function StudentPage() {
     return () => unsubscribe();
   }, [user]);
 
-  // Listen to subjects collection
+  // Listen to timetable from Firestore doc (timetable/CSE-DS -> sections MAP)
   useEffect(() => {
-    if (!user || user.email === ADMIN_EMAIL) return;
+    if (!user || user.email === ADMIN_EMAIL || !sectionLetter) return;
 
-    const unsubscribe = onSnapshot(collection(db, "subjects"), (snapshot) => {
-      const subjectsData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        name: doc.data().name,
-      }));
-      setSubjects(subjectsData);
+    const timetableDocRef = doc(db, "timetable", "CSE-DS");
+    const unsubscribe = onSnapshot(timetableDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const sections = data.sections || {};
+        const sectionData = sections[sectionLetter] || {};
+        const dayKey = format(todayDate, "EEEE").toLowerCase(); // "monday", "tuesday", etc.
+        const slots: TimetableSlot[] = (sectionData[dayKey] || [])
+          .sort((a: TimetableSlot, b: TimetableSlot) => a.start.localeCompare(b.start));
+        setTodaySlots(slots);
+      } else {
+        setTodaySlots([]);
+      }
     });
 
     return () => unsubscribe();
-  }, [user]);
-
-  // Listen to timetable for user's section
-  useEffect(() => {
-    if (!user || user.email === ADMIN_EMAIL || !userSection) return;
-
-    const q = query(
-      collection(db, "timetable"),
-      where("sectionId", "==", userSection)
-    );
-
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const timetableData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      } as TimetableEntry));
-      setTimetable(timetableData);
-    });
-
-    return () => unsubscribe();
-  }, [user, userSection]);
+  }, [user, sectionLetter]);
 
   // Listen to holidays collection
   useEffect(() => {
@@ -267,36 +255,39 @@ export default function StudentPage() {
     router.push("/login");
   };
 
-  const handleMarkAttendance = async (entryId: string, status: "PRESENT" | "ABSENT") => {
+  const handleMarkAttendance = async (slotKey: string, slot: TimetableSlot, status: "PRESENT" | "ABSENT") => {
     if (!user) return;
 
-    // Get the timetable entry to find the subject and class count
-    const entry = timetable.find(e => e.id === entryId);
-    if (!entry) return;
+    // Check if already submitted for this slot today
+    if (attendance[slotKey]) {
+      alert("You have already marked attendance for this period.");
+      return;
+    }
 
-    setSubmitting({ ...submitting, [entryId]: true });
+    setSubmitting({ ...submitting, [slotKey]: true });
 
     try {
       const attendanceDoc = doc(db, "attendance", user.uid, "dates", selectedDateStr);
       const record: AttendanceRecord = {
-        subjectId: entry.subjectId,
+        subjectId: slot.subject,
         status,
         timestamp: Date.now(),
-        classCount: entry.classCount || 1, // Default to 1 for legacy entries
+        classCount: slot.classCount || 1,
       };
 
       await setDoc(attendanceDoc, {
-        [entryId]: record,
+        [slotKey]: record,
       }, { merge: true });
 
       setAttendance({
         ...attendance,
-        [entryId]: record,
+        [slotKey]: record,
       });
     } catch (error) {
       console.error("Error marking attendance:", error);
+      alert("Network error. Please try again.");
     } finally {
-      setSubmitting({ ...submitting, [entryId]: false });
+      setSubmitting({ ...submitting, [slotKey]: false });
     }
   };
 
@@ -556,11 +547,7 @@ export default function StudentPage() {
               </CardContent>
             </Card>
           ) : (() => {
-              const todayTimetable = timetable
-                .filter(t => t.day === dayOfWeek)
-                .sort((a, b) => a.order - b.order);
-
-              if (todayTimetable.length === 0) {
+              if (todaySlots.length === 0) {
                 return (
                   <Card>
                     <CardContent className="py-12 text-center">
@@ -578,10 +565,11 @@ export default function StudentPage() {
 
               return (
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {todayTimetable.map((entry, index) => {
-                    const isSubmitted = !!attendance[entry.id];
-                    const record = attendance[entry.id];
-                    const subject = subjects.find(s => s.id === entry.subjectId);
+                  {todaySlots.map((slot, index) => {
+                    // Create a stable key for each slot: "subject_start_end"
+                    const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
+                    const isSubmitted = !!attendance[slotKey];
+                    const record = attendance[slotKey];
                     const fadeClass = index === 0 ? 'animate-fade-in'
                       : index === 1 ? 'animate-fade-in-delay-1'
                       : index === 2 ? 'animate-fade-in-delay-2'
@@ -591,7 +579,7 @@ export default function StudentPage() {
 
                     return (
                       <div
-                        key={entry.id}
+                        key={slotKey}
                         className={fadeClass}
                       >
                         <Card 
@@ -599,9 +587,9 @@ export default function StudentPage() {
                         >
                           <CardHeader>
                             <CardTitle className="text-lg">
-                              {entry.startTime} – {entry.endTime}
+                              {slot.start} – {slot.end}
                               <span className="ml-2 text-sm font-normal text-blue-600 dark:text-blue-400">
-                                ({entry.classCount || 1} class{(entry.classCount || 1) > 1 ? 'es' : ''})
+                                ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
                               </span>
                             </CardTitle>
                             <AnimatePresence mode="wait">
@@ -642,7 +630,7 @@ export default function StudentPage() {
                                   <p className="text-sm text-neutral-600 dark:text-neutral-400">
                                     Subject:{" "}
                                     <span className="font-medium text-neutral-900 dark:text-neutral-50">
-                                      {subject?.name || "Unknown"}
+                                      {slot.subject}
                                     </span>
                                   </p>
                                   <p className="text-xs text-neutral-500 dark:text-neutral-400">
@@ -663,18 +651,18 @@ export default function StudentPage() {
                                       Subject
                                     </p>
                                     <p className="text-sm text-neutral-900 dark:text-neutral-50 font-medium">
-                                      {subject?.name || "Unknown"}
+                                      {slot.subject}
                                     </p>
                                   </div>
 
                                   <div className="flex gap-2">
                                     <Button
                                       className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[44px] dark:bg-green-700 dark:hover:bg-green-800"
-                                      onClick={() => handleMarkAttendance(entry.id, "PRESENT")}
-                                      disabled={submitting[entry.id]}
-                                      aria-label={`Mark present for ${entry.startTime}–${entry.endTime}`}
+                                      onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
+                                      disabled={submitting[slotKey]}
+                                      aria-label={`Mark present for ${slot.start}–${slot.end}`}
                                     >
-                                      {submitting[entry.id] ? (
+                                      {submitting[slotKey] ? (
                                         <LoadingSpinner size="sm" />
                                       ) : (
                                         "Present"
@@ -682,11 +670,11 @@ export default function StudentPage() {
                                     </Button>
                                     <Button
                                       className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[44px] dark:bg-red-700 dark:hover:bg-red-800"
-                                      onClick={() => handleMarkAttendance(entry.id, "ABSENT")}
-                                      disabled={submitting[entry.id]}
-                                      aria-label={`Mark absent for ${entry.startTime}–${entry.endTime}`}
+                                      onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
+                                      disabled={submitting[slotKey]}
+                                      aria-label={`Mark absent for ${slot.start}–${slot.end}`}
                                     >
-                                      {submitting[entry.id] ? (
+                                      {submitting[slotKey] ? (
                                         <LoadingSpinner size="sm" />
                                       ) : (
                                         "Absent"

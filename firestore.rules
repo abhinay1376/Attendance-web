@@ -5,7 +5,7 @@ service cloud.firestore {
     
     // Helper function to check if user is admin
     function isAdmin() {
-      return request.auth != null && request.auth.token.email == 'admin@gmail.com';
+      return request.auth != null && request.auth.token.email == 'admin@example.com';
     }
     
     // Helper function to check if user is approved
@@ -15,8 +15,8 @@ service cloud.firestore {
     
     // Users collection
     match /users/{userId} {
-      // Users can read their own document
-      allow read: if request.auth != null && request.auth.uid == userId;
+      // Users can read their own document; admin can read ALL users
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
       
       // Users can create their own document during signup
       allow create: if request.auth != null && request.auth.uid == userId;
@@ -79,8 +79,8 @@ service cloud.firestore {
     
     // Attendance collection - CRITICAL APPROVAL CHECK
     match /attendance/{userId}/{document=**} {
-      // Users can read their own attendance
-      allow read: if request.auth != null && request.auth.uid == userId;
+      // Users can read their own attendance; admin can read ALL for overview
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
       
       // Users can ONLY write attendance if they are approved
       allow write: if request.auth != null 

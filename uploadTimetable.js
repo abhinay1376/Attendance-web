@@ -1,0 +1,149 @@
+const admin = require("firebase-admin");
+const serviceAccount = require("./serviceAccountKey.json");
+
+// Initialize Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const db = admin.firestore();
+
+// ================= TIMETABLE =================
+const timetable = {
+  branch: "CSE-DS",
+  sections: {
+    A: {
+      monday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "OT", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DL&CO", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      tuesday: [
+        { subject: "DBMS LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DL&CO", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      wednesday: [
+        { subject: "DE LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      thursday: [
+        { subject: "SMDS", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DE", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      friday: [
+        { subject: "SMDS", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS LAB", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "OT", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      saturday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "OT", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+    },
+
+    B: {
+      monday: [
+        { subject: "DE LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DL&CO", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      tuesday: [
+        { subject: "DBMS", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "SMDS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "OT", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      wednesday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "SMDS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DBMS LAB", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      thursday: [
+        { subject: "OT", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DE LAB", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      friday: [
+        { subject: "DL&CO", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DTI", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      saturday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+      ],
+    },
+
+    C: {
+      monday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DTI", start: "11:00", end: "12:40", classCount: 2 },
+      ],
+      tuesday: [
+        { subject: "DBMS LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "SMDS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DL&CO", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      wednesday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "OT", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DBMS", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      thursday: [
+        { subject: "DL&CO", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS LAB", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DE LAB", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      friday: [
+        { subject: "SMDS", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "OT", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      saturday: [
+        { subject: "DE", start: "09:00", end: "10:40", classCount: 2 },
+      ],
+    },
+
+    D: {
+      monday: [
+        { subject: "DE LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DL&CO", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "OT", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      tuesday: [
+        { subject: "DBMS", start: "09:00", end: "10:40", classCount: 2 },
+      ],
+      wednesday: [
+        { subject: "DE LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "SMDS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DBMS", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      thursday: [
+        { subject: "DL&CO", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DE", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      friday: [
+        { subject: "OT", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "DBMS LAB", start: "11:00", end: "12:40", classCount: 2 },
+        { subject: "DTI", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+      saturday: [
+        { subject: "DE LAB", start: "09:00", end: "10:40", classCount: 2 },
+        { subject: "SMDS", start: "13:50", end: "15:30", classCount: 2 },
+      ],
+    },
+  },
+};
+
+// ================= UPLOAD =================
+async function upload() {
+  try {
+    await db.collection("timetable").doc("CSE-DS").set(timetable);
+    console.log("✅ Timetable uploaded successfully");
+    process.exit(0);
+  } catch (err) {
+    console.error("❌ Upload failed:", err);
+    process.exit(1);
+  }
+}
+
+upload();

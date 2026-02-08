@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, setDoc, writeBatch, query, where } from "firebase/firestore";
+import { collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, setDoc, getDoc, writeBatch, query, where } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL, WEEKDAYS } from "@/lib/constants";
@@ -16,8 +16,8 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PageTransition } from "@/components/page-transition";
-import { CalendarIcon, AlertTriangle, Trash2, Clock } from "lucide-react";
-import { format, parse } from "date-fns";
+import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX } from "lucide-react";
+import { format } from "date-fns";
 
 interface Subject {
   id: string;
@@ -51,16 +51,19 @@ interface Section {
   active: boolean;
 }
 
-interface TimetableEntry {
-  id: string;
-  sectionId: string;
-  day: string;
-  subjectId: string;
-  startTime: string; // HH:mm format
-  endTime: string;   // HH:mm format
-  order: number;
-  classCount: number; // Number of classes based on duration (1 class = 50 mins)
+// ─── NEW TIMETABLE SCHEMA ───
+// Firestore doc: timetable/CSE-DS
+// Structure: { sections: { A: { monday: [{subject, start, end, classCount}], ... }, B: {...} } }
+interface TimetableSlot {
+  subject: string;
+  start: string;   // HH:mm
+  end: string;      // HH:mm
+  classCount: number;
 }
+
+// The full timetable from Firestore, keyed by section letter → day → slots
+type SectionTimetable = Record<string, TimetableSlot[]>; // day → slots
+type FullTimetable = Record<string, SectionTimetable>;    // sectionLetter → day → slots
 
 interface Holiday {
   date: string;
@@ -87,6 +90,14 @@ function computeAttendance(initial: { attended: number; total: number } | undefi
   return { initialAttended, initialTotal, totalAttended, totalClasses, percentage, ...app };
 }
 
+// Map section Firestore doc IDs (from sections collection) to timetable section letters (A, B, C, D)
+// Section name is like "CSE-A", "CSE-B" etc. We extract the last letter.
+function sectionNameToLetter(sectionName: string): string {
+  // Extract the last character after the last hyphen, e.g. "CSE-A" -> "A"
+  const parts = sectionName.split("-");
+  return parts[parts.length - 1].toUpperCase();
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const { user, loading } = useAuth();
@@ -96,7 +107,7 @@ export default function AdminPage() {
   const [students, setStudents] = useState<StudentInfo[]>([]);
   const [holidays, setHolidays] = useState<Holiday[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
-  const [timetable, setTimetable] = useState<TimetableEntry[]>([]);
+  const [timetable, setTimetable] = useState<FullTimetable>({});
   // Real-time app attendance per student: uid -> { appAttended, appTotal }
   const [appAttendanceMap, setAppAttendanceMap] = useState<Record<string, AppAttendanceData>>({});
   const [attendanceLoading, setAttendanceLoading] = useState(true);
@@ -111,29 +122,90 @@ export default function AdminPage() {
   const [isAddingSection, setIsAddingSection] = useState(false);
 
   // Timetable management
-  const [selectedSection, setSelectedSection] = useState("");
-  const [selectedDay, setSelectedDay] = useState("Monday");
-  const [selectedSubject, setSelectedSubject] = useState("");
-  const [startTime, setStartTime] = useState("");
-  const [endTime, setEndTime] = useState("");
-  const [isAddingTimetable, setIsAddingTimetable] = useState(false);
+  const [viewSection, setViewSection] = useState("");
+  const [newSlotDay, setNewSlotDay] = useState("monday");
+  const [newSlotSubject, setNewSlotSubject] = useState("");
+  const [newSlotStart, setNewSlotStart] = useState("");
+  const [newSlotEnd, setNewSlotEnd] = useState("");
+  const [isAddingSlot, setIsAddingSlot] = useState(false);
+  const [isDeletingSlot, setIsDeletingSlot] = useState<string | null>(null);
 
-  // Helper function to calculate class count from duration
-  const ONE_CLASS_DURATION = 50; // minutes
-  
+  // Helper: calculate classCount from start/end times
+  const ONE_CLASS_DURATION = 50;
   const calculateClassCount = (start: string, end: string): number => {
     if (!start || !end) return 0;
-    const [startH, startM] = start.split(':').map(Number);
-    const [endH, endM] = end.split(':').map(Number);
-    const startMinutes = startH * 60 + startM;
-    const endMinutes = endH * 60 + endM;
-    const duration = endMinutes - startMinutes;
-    if (duration <= 0) return 0;
-    return Math.ceil(duration / ONE_CLASS_DURATION);
+    const [sH, sM] = start.split(':').map(Number);
+    const [eH, eM] = end.split(':').map(Number);
+    const dur = (eH * 60 + eM) - (sH * 60 + sM);
+    return dur > 0 ? Math.ceil(dur / ONE_CLASS_DURATION) : 0;
+  };
+  const previewClassCount = calculateClassCount(newSlotStart, newSlotEnd);
+
+  // ─── TIMETABLE ADD / DELETE HANDLERS ───
+  const handleAddSlot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!viewSection || !newSlotDay || !newSlotSubject.trim() || !newSlotStart || !newSlotEnd) return;
+    if (previewClassCount <= 0) { alert("End time must be after start time."); return; }
+
+    setIsAddingSlot(true);
+    try {
+      const timetableRef = doc(db, "timetable", "CSE-DS");
+      const snap = await getDoc(timetableRef);
+      const data = snap.exists() ? snap.data() : { branch: "CSE-DS", sections: {} };
+      const sections = data.sections || {};
+      const sectionData = sections[viewSection] || {};
+      const daySlots: TimetableSlot[] = sectionData[newSlotDay] || [];
+
+      // Duplicate check
+      const dup = daySlots.some(s => s.start === newSlotStart && s.end === newSlotEnd);
+      if (dup) { alert("A slot with the same time already exists."); setIsAddingSlot(false); return; }
+
+      daySlots.push({ subject: newSlotSubject.trim(), start: newSlotStart, end: newSlotEnd, classCount: previewClassCount });
+      daySlots.sort((a, b) => a.start.localeCompare(b.start));
+
+      sectionData[newSlotDay] = daySlots;
+      sections[viewSection] = sectionData;
+
+      await setDoc(timetableRef, { ...data, sections }, { merge: true });
+      setNewSlotSubject("");
+      setNewSlotStart("");
+      setNewSlotEnd("");
+    } catch (error) {
+      console.error("Error adding slot:", error);
+      alert("Error adding timetable entry");
+    } finally {
+      setIsAddingSlot(false);
+    }
   };
 
-  // Computed class count for preview
-  const previewClassCount = calculateClassCount(startTime, endTime);
+  const handleDeleteSlot = async (dayKey: string, slotIdx: number) => {
+    const deleteKey = `${dayKey}-${slotIdx}`;
+    if (!confirm("Delete this timetable entry?")) return;
+    setIsDeletingSlot(deleteKey);
+    try {
+      const timetableRef = doc(db, "timetable", "CSE-DS");
+      const snap = await getDoc(timetableRef);
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const sections = data.sections || {};
+      const sectionData = sections[viewSection] || {};
+      const daySlots: TimetableSlot[] = [...(sectionData[dayKey] || [])];
+      daySlots.splice(slotIdx, 1);
+      sectionData[dayKey] = daySlots;
+      sections[viewSection] = sectionData;
+      await setDoc(timetableRef, { ...data, sections }, { merge: true });
+    } catch (error) {
+      console.error("Error deleting slot:", error);
+      alert("Error deleting timetable entry");
+    } finally {
+      setIsDeletingSlot(null);
+    }
+  };
+
+  // Delete user modal state
+  const [deleteUserUid, setDeleteUserUid] = useState<string | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
 
   // Initial attendance form state
   const [selectedStudentUid, setSelectedStudentUid] = useState("");
@@ -279,17 +351,27 @@ export default function AdminPage() {
     return () => unsubscribe();
   }, [user]);
 
-  // Listen to timetable collection
+  // Listen to timetable document (single doc: timetable/CSE-DS with sections MAP)
   useEffect(() => {
     if (!user || user.email !== ADMIN_EMAIL) return;
 
-    const unsubscribe = onSnapshot(collection(db, "timetable"), (snapshot) => {
-      const timetableData = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      } as TimetableEntry));
-      setTimetable(timetableData);
-    });
+    const timetableDocRef = doc(db, "timetable", "CSE-DS");
+    const unsubscribe = onSnapshot(
+      timetableDocRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          setTimetable((data.sections || {}) as FullTimetable);
+        } else {
+          setTimetable({});
+        }
+      },
+      (error) => {
+        console.error("Timetable listener error:", error.message);
+        // Firestore rules may be blocking — show empty state gracefully
+        setTimetable({});
+      }
+    );
 
     return () => unsubscribe();
   }, [user]);
@@ -321,9 +403,10 @@ export default function AdminPage() {
           const data = dateDoc.data();
           Object.values(data).forEach((record: any) => {
             if (record && typeof record.status === "string") {
-              total++;
+              const count = record.classCount || 1;
+              total += count;
               if (record.status === "PRESENT") {
-                attended++;
+                attended += count;
               }
             }
           });
@@ -537,19 +620,10 @@ export default function AdminPage() {
   };
 
   const handleDeleteSection = async (sectionId: string) => {
-    if (!confirm("Delete this section? This will remove associated timetable entries.")) return;
+    if (!confirm("Delete this section? Students in this section will need reassignment.")) return;
 
     try {
-      // Delete section
       await deleteDoc(doc(db, "sections", sectionId));
-      
-      // Delete associated timetable entries
-      const timetableQuery = query(collection(db, "timetable"), where("sectionId", "==", sectionId));
-      const timetableSnapshot = await getDocs(timetableQuery);
-      const batch = writeBatch(db);
-      timetableSnapshot.forEach(doc => batch.delete(doc.ref));
-      await batch.commit();
-
       alert("Section deleted");
     } catch (error) {
       console.error("Error deleting section:", error);
@@ -557,54 +631,48 @@ export default function AdminPage() {
     }
   };
 
-  const handleAddTimetableEntry = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedSection || !selectedDay || !selectedSubject || !startTime || !endTime) return;
+  // ─── DELETE USER (with confirmation modal) ───
+  const handleDeleteUser = async () => {
+    if (!deleteUserUid || deleteConfirmText !== "DELETE") return;
 
-    const classCount = calculateClassCount(startTime, endTime);
-    if (classCount <= 0) {
-      alert("Invalid time range. End time must be after start time.");
-      return;
-    }
+    const student = students.find(s => s.uid === deleteUserUid);
+    if (!student) return;
 
-    setIsAddingTimetable(true);
+    setIsDeletingUser(true);
     try {
-      // Calculate order based on start time
-      const existingEntries = timetable.filter(
-        t => t.sectionId === selectedSection && t.day === selectedDay
-      );
-      const order = existingEntries.length;
-
-      await addDoc(collection(db, "timetable"), {
-        sectionId: selectedSection,
-        day: selectedDay,
-        subjectId: selectedSubject,
-        startTime,
-        endTime,
-        order,
-        classCount,
+      // 1. Delete all attendance records for this user
+      const datesRef = collection(db, "attendance", deleteUserUid, "dates");
+      const datesSnapshot = await getDocs(datesRef);
+      const batch = writeBatch(db);
+      datesSnapshot.forEach((dateDoc) => {
+        batch.delete(dateDoc.ref);
       });
 
-      setSelectedSubject("");
-      setStartTime("");
-      setEndTime("");
-      alert(`Timetable entry added (${classCount} class${classCount > 1 ? 'es' : ''})`);
+      // 2. Delete user document
+      batch.delete(doc(db, "users", deleteUserUid));
+
+      // 3. Audit log
+      const auditRef = doc(collection(db, "auditLog"));
+      batch.set(auditRef, {
+        action: "USER_DELETED",
+        studentUid: deleteUserUid,
+        studentEmail: student.email,
+        studentName: student.name || "N/A",
+        studentRegNo: student.regNo || "N/A",
+        performedBy: user?.email,
+        timestamp: Date.now(),
+      });
+
+      await batch.commit();
+
+      setDeleteUserUid(null);
+      setDeleteConfirmText("");
+      alert(`User ${student.name || student.email} deleted successfully`);
     } catch (error) {
-      console.error("Error adding timetable entry:", error);
-      alert("Error adding timetable entry");
+      console.error("Error deleting user:", error);
+      alert("Error deleting user: " + error);
     } finally {
-      setIsAddingTimetable(false);
-    }
-  };
-
-  const handleDeleteTimetableEntry = async (entryId: string) => {
-    if (!confirm("Delete this timetable entry?")) return;
-
-    try {
-      await deleteDoc(doc(db, "timetable", entryId));
-    } catch (error) {
-      console.error("Error deleting timetable entry:", error);
-      alert("Error deleting entry");
+      setIsDeletingUser(false);
     }
   };
 
@@ -955,9 +1023,22 @@ export default function AdminPage() {
                             )}
                           </div>
                         </div>
-                        <span className="text-xs font-semibold text-green-600 dark:text-green-500">
-                          Approved
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-green-600 dark:text-green-500">
+                            Approved
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => {
+                              setDeleteUserUid(student.uid);
+                              setDeleteConfirmText("");
+                            }}
+                            title="Delete user"
+                          >
+                            <UserX className="h-3 w-3" />
+                          </Button>
+                        </div>
                       </div>
                       );
                     })}
@@ -1220,157 +1301,167 @@ export default function AdminPage() {
         <Card elevation={3}>
           <CardHeader>
             <CardTitle>Weekly Timetable</CardTitle>
-            <CardDescription>Configure class schedule with precise timings for each section</CardDescription>
+            <CardDescription>
+              Manage the class schedule. Select a section, then add or delete entries.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <form onSubmit={handleAddTimetableEntry} className="space-y-4 rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
-              <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">Add Timetable Entry</h3>
-              
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    Section
-                  </label>
-                  <Select value={selectedSection} onValueChange={setSelectedSection} disabled={isAddingTimetable}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select section" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {sections.filter(s => s.active).map(section => (
-                        <SelectItem key={section.id} value={section.id}>
-                          {section.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+            {/* Section selector */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                Section
+              </label>
+              <Select value={viewSection} onValueChange={setViewSection}>
+                <SelectTrigger className="w-full sm:w-64">
+                  <SelectValue placeholder="Select section" />
+                </SelectTrigger>
+                <SelectContent>
+                  {sections.filter(s => s.active).map(section => (
+                    <SelectItem key={section.id} value={sectionNameToLetter(section.name)}>
+                      {section.name}
+                    </SelectItem>
+                  ))}
+                  {Object.keys(timetable)
+                    .filter(letter => !sections.some(s => sectionNameToLetter(s.name) === letter))
+                    .map(letter => (
+                      <SelectItem key={letter} value={letter}>
+                        Section {letter}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    Day
-                  </label>
-                  <Select value={selectedDay} onValueChange={setSelectedDay} disabled={isAddingTimetable}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {WEEKDAYS.map(day => (
-                        <SelectItem key={day} value={day}>{day}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+            {/* Add entry form — only when a section is selected */}
+            {viewSection && (
+              <form onSubmit={handleAddSlot} className="space-y-4 rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
+                <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">Add Timetable Entry — Section {viewSection}</h3>
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Day</label>
+                    <Select value={newSlotDay} onValueChange={setNewSlotDay} disabled={isAddingSlot}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {WEEKDAYS.map(d => (
+                          <SelectItem key={d} value={d.toLowerCase()}>{d}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Subject</label>
+                    <Input
+                      placeholder="e.g. DBMS"
+                      value={newSlotSubject}
+                      onChange={e => setNewSlotSubject(e.target.value)}
+                      disabled={isAddingSlot}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Start Time</label>
+                    <Input type="time" value={newSlotStart} onChange={e => setNewSlotStart(e.target.value)} disabled={isAddingSlot} />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">End Time</label>
+                    <Input type="time" value={newSlotEnd} onChange={e => setNewSlotEnd(e.target.value)} disabled={isAddingSlot} />
+                  </div>
+                  <div className="flex flex-col justify-end space-y-2">
+                    {previewClassCount > 0 && (
+                      <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                        = {previewClassCount} class{previewClassCount > 1 ? 'es' : ''}
+                      </p>
+                    )}
+                    <Button
+                      type="submit"
+                      disabled={isAddingSlot || !newSlotSubject.trim() || !newSlotStart || !newSlotEnd || previewClassCount <= 0}
+                      className="w-full"
+                    >
+                      {isAddingSlot ? "Adding..." : "Add Entry"}
+                    </Button>
+                  </div>
                 </div>
+              </form>
+            )}
 
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    Subject
-                  </label>
-                  <Select value={selectedSubject} onValueChange={setSelectedSubject} disabled={isAddingTimetable}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select subject" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {subjects.map(subject => (
-                        <SelectItem key={subject.id} value={subject.id}>
-                          {subject.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    Start Time
-                  </label>
-                  <Input
-                    type="time"
-                    value={startTime}
-                    onChange={(e) => setStartTime(e.target.value)}
-                    disabled={isAddingTimetable}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                    End Time
-                  </label>
-                  <Input
-                    type="time"
-                    value={endTime}
-                    onChange={(e) => setEndTime(e.target.value)}
-                    disabled={isAddingTimetable}
-                  />
-                </div>
-
-                <div className="flex flex-col justify-end space-y-2">
-                  {previewClassCount > 0 && (
-                    <p className="text-xs font-medium text-blue-600 dark:text-blue-400">
-                      This period counts as {previewClassCount} class{previewClassCount > 1 ? 'es' : ''}
-                    </p>
-                  )}
-                  <Button
-                    type="submit"
-                    disabled={isAddingTimetable || !selectedSection || !selectedSubject || !startTime || !endTime || previewClassCount <= 0}
-                    className="w-full"
-                  >
-                    {isAddingTimetable ? "Adding..." : "Add Entry"}
-                  </Button>
-                </div>
-              </div>
-            </form>
-
-            {selectedSection && (
+            {/* Day-wise timetable with delete buttons */}
+            {viewSection && timetable[viewSection] ? (
               <div className="space-y-4">
                 <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">
-                  Schedule for {sections.find(s => s.id === selectedSection)?.name}
+                  Schedule for Section {viewSection}
                 </h3>
                 {WEEKDAYS.map(day => {
-                  const dayEntries = timetable
-                    .filter(t => t.sectionId === selectedSection && t.day === day)
-                    .sort((a, b) => a.order - b.order);
+                  const dayKey = day.toLowerCase();
+                  const daySlots = timetable[viewSection]?.[dayKey] || [];
+                  const sorted = [...daySlots].sort((a, b) => a.start.localeCompare(b.start));
 
                   return (
                     <div key={day} className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
-                      <h4 className="mb-3 text-sm font-semibold text-neutral-900 dark:text-neutral-50">{day}</h4>
-                      {dayEntries.length === 0 ? (
+                      <h4 className="mb-3 text-sm font-semibold text-neutral-900 dark:text-neutral-50">
+                        {day}
+                        <span className="ml-2 text-xs font-normal text-neutral-500 dark:text-neutral-400">
+                          ({sorted.length} entr{sorted.length === 1 ? 'y' : 'ies'})
+                        </span>
+                      </h4>
+                      {sorted.length === 0 ? (
                         <p className="text-xs text-neutral-500 dark:text-neutral-400">No classes scheduled</p>
                       ) : (
                         <div className="space-y-2">
-                          {dayEntries.map(entry => (
-                            <div
-                              key={entry.id}
-                              className="flex items-center justify-between rounded border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-800"
-                            >
-                              <div className="flex items-center gap-3">
-                                <Clock className="h-4 w-4 text-neutral-500" />
-                                <div>
-                                  <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                                    {subjects.find(s => s.id === entry.subjectId)?.name || 'Unknown'}
-                                  </p>
-                                  <p className="text-xs text-neutral-600 dark:text-neutral-400">
-                                    {entry.startTime} – {entry.endTime}
-                                    <span className="ml-2 text-blue-600 dark:text-blue-400">
-                                      ({entry.classCount || 1} class{(entry.classCount || 1) > 1 ? 'es' : ''})
-                                    </span>
-                                  </p>
-                                </div>
-                              </div>
-                              <Button
-                                size="sm"
-                                variant="destructive"
-                                onClick={() => handleDeleteTimetableEntry(entry.id)}
+                          {sorted.map((slot, idx) => {
+                            // Find the original index in the unsorted array for deletion
+                            const origIdx = daySlots.findIndex(
+                              s => s.subject === slot.subject && s.start === slot.start && s.end === slot.end
+                            );
+                            const delKey = `${dayKey}-${origIdx}`;
+                            return (
+                              <div
+                                key={`${day}-${idx}`}
+                                className="flex items-center justify-between rounded border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-800"
                               >
-                                <Trash2 className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          ))}
+                                <div className="flex items-center gap-3">
+                                  <Clock className="h-4 w-4 text-neutral-500" />
+                                  <div>
+                                    <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
+                                      {slot.subject}
+                                    </p>
+                                    <p className="text-xs text-neutral-600 dark:text-neutral-400">
+                                      {slot.start} – {slot.end}
+                                      <span className="ml-2 text-blue-600 dark:text-blue-400">
+                                        ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
+                                      </span>
+                                    </p>
+                                  </div>
+                                </div>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={isDeletingSlot === delKey}
+                                  onClick={() => handleDeleteSlot(dayKey, origIdx)}
+                                >
+                                  {isDeletingSlot === delKey ? (
+                                    <LoadingSpinner size="sm" />
+                                  ) : (
+                                    <Trash2 className="h-3 w-3" />
+                                  )}
+                                </Button>
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   );
                 })}
               </div>
+            ) : viewSection ? (
+              <p className="text-center text-sm text-neutral-500 dark:text-neutral-400 py-4">
+                No timetable data for Section {viewSection} yet. Use the form above to add entries.
+              </p>
+            ) : (
+              <p className="text-center text-sm text-neutral-500 dark:text-neutral-400 py-4">
+                {Object.keys(timetable).length > 0
+                  ? `Timetable loaded for sections: ${Object.keys(timetable).join(", ")}. Select a section above to manage.`
+                  : "No timetable data yet. Select a section and add entries above."}
+              </p>
             )}
           </CardContent>
         </Card>
@@ -1544,6 +1635,70 @@ export default function AdminPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* ─── DELETE USER CONFIRMATION MODAL ─── */}
+        {deleteUserUid && (() => {
+          const studentToDelete = students.find(s => s.uid === deleteUserUid);
+          if (!studentToDelete) return null;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+              <Card elevation={4} className="w-full max-w-md border-red-200 dark:border-red-800">
+                <CardHeader>
+                  <CardTitle className="text-red-600 dark:text-red-400 flex items-center gap-2">
+                    <UserX className="h-5 w-5" />
+                    Delete User
+                  </CardTitle>
+                  <CardDescription>
+                    This will permanently delete the user and all their attendance data.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
+                    <p className="text-sm font-semibold text-red-800 dark:text-red-200">
+                      {studentToDelete.name || "No Name"}
+                    </p>
+                    <p className="text-xs text-red-600 dark:text-red-400 font-mono">
+                      {studentToDelete.regNo || studentToDelete.email}
+                    </p>
+                  </div>
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>
+                      Type <strong>DELETE</strong> to confirm. This cannot be undone.
+                    </AlertDescription>
+                  </Alert>
+                  <Input
+                    placeholder="Type DELETE to confirm"
+                    value={deleteConfirmText}
+                    onChange={(e) => setDeleteConfirmText(e.target.value)}
+                    disabled={isDeletingUser}
+                  />
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setDeleteUserUid(null);
+                        setDeleteConfirmText("");
+                      }}
+                      disabled={isDeletingUser}
+                      className="flex-1"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      onClick={handleDeleteUser}
+                      disabled={isDeletingUser || deleteConfirmText !== "DELETE"}
+                      className="flex-1"
+                    >
+                      {isDeletingUser ? "Deleting..." : "Delete User"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          );
+        })()}
       </div>
     </div>
     </PageTransition>
