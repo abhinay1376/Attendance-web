@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
-import { createUserWithEmailAndPassword } from "firebase/auth";
-import { doc, setDoc, collection, onSnapshot, query, where } from "firebase/firestore";
+import { createUserWithEmailAndPassword, deleteUser } from "firebase/auth";
+import { doc, setDoc, collection, onSnapshot, query, where, getDocs, limit } from "firebase/firestore";
 import { motion } from "framer-motion";
 
 import { auth, db } from "@/lib/firebase";
@@ -81,52 +81,47 @@ export default function RegisterPage() {
         setError("Phone number must be exactly 10 digits");
         return;
       }
+    }
 
-      // Check registration number and phone uniqueness via server API
-      setIsLoading(true);
-      try {
-        const checkRes = await fetch("/api/check-regno", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ regNo: regNo.toLowerCase(), phone }),
-        });
-        const checkData = await checkRes.json();
-        if (!checkRes.ok) {
+    setIsLoading(true);
+
+    try {
+      // Create Firebase Auth user first
+      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+      const user = userCredential.user;
+
+      // For non-admin users, check uniqueness now that we're authenticated
+      if (user.email !== ADMIN_EMAIL) {
+        try {
+          const regSnap = await getDocs(
+            query(collection(db, "users"), where("regNo", "==", regNo.toLowerCase()), limit(1))
+          );
+          if (!regSnap.empty) {
+            // Duplicate regNo — delete the just-created auth user
+            await deleteUser(user);
+            setError("Registration number already exists");
+            setIsLoading(false);
+            return;
+          }
+
+          const phoneSnap = await getDocs(
+            query(collection(db, "users"), where("phone", "==", phone), limit(1))
+          );
+          if (!phoneSnap.empty) {
+            await deleteUser(user);
+            setError("Phone number already registered");
+            setIsLoading(false);
+            return;
+          }
+        } catch {
+          // If uniqueness check fails, delete the auth user and bail
+          await deleteUser(user).catch(() => {});
           setError("Unable to verify details. Please try again.");
           setIsLoading(false);
           return;
         }
-        if (checkData.regNoExists) {
-          setError("Registration number already exists");
-          setIsLoading(false);
-          return;
-        }
-        if (checkData.phoneExists) {
-          setError("Phone number already registered");
-          setIsLoading(false);
-          return;
-        }
-      } catch {
-        setError("Network error. Please check your connection and try again.");
-        setIsLoading(false);
-        return;
-      }
-    } else {
-      setIsLoading(true);
-    }
 
-    try {
-      const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-      const user = userCredential.user;
-
-      // Create user document in Firestore
-      if (user.email === ADMIN_EMAIL) {
-        await setDoc(doc(db, "users", user.uid), {
-          email: user.email,
-          approved: true,
-        });
-        router.push("/admin");
-      } else {
+        // All checks passed — create the Firestore user doc
         await setDoc(doc(db, "users", user.uid), {
           email: user.email,
           name: name.trim(),
@@ -139,6 +134,13 @@ export default function RegisterPage() {
           createdAt: Date.now(),
         });
         router.push("/pending-approval");
+      } else {
+        // Admin user
+        await setDoc(doc(db, "users", user.uid), {
+          email: user.email,
+          approved: true,
+        });
+        router.push("/admin");
       }
     } catch (err) {
       const firebaseMessage = err instanceof Error ? err.message : "Unable to create account.";

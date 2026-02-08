@@ -16,7 +16,9 @@ service cloud.firestore {
     // Users collection
     match /users/{userId} {
       // Users can read their own document; admin can read ALL users
+      // Also allow any authenticated user to query by regNo/phone for uniqueness checks during registration
       allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+      allow list: if request.auth != null;
       
       // Users can create their own document during signup
       allow create: if request.auth != null && request.auth.uid == userId;
@@ -24,30 +26,12 @@ service cloud.firestore {
       // Users can update their own document ONLY if not yet approved
       // Once approved, only admin can modify
       allow update: if request.auth != null && (
-        (request.auth.uid == userId && get(/databases/$(database)/documents/users/$(userId)).data.approved != true) 
-        || isAdmin()
+        (request.auth.uid == userId && get(/databases/$(database)/documents/users/$(userId)).data.approved != true)
+          || isAdmin()
       );
       
       // Only admin can delete
       allow delete: if isAdmin();
-    }
-    
-    // Subjects collection
-    match /subjects/{subjectId} {
-      // Anyone authenticated can read subjects
-      allow read: if request.auth != null;
-      
-      // Only admin can write subjects
-      allow write: if isAdmin();
-    }
-    
-    // Periods collection
-    match /periods/{periodId} {
-      // Anyone authenticated can read periods
-      allow read: if request.auth != null;
-      
-      // Only admin can write periods
-      allow write: if isAdmin();
     }
 
     // Sections collection (public read so register page can list them)
