@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminAuth } from "@/lib/firebase-admin";
+import { getAdminAuth } from "@/lib/firebase-admin";
 import { ADMIN_EMAIL } from "@/lib/constants";
 
 export async function POST(request: NextRequest) {
@@ -9,6 +9,8 @@ export async function POST(request: NextRequest) {
     if (!uid || !adminToken) {
       return NextResponse.json({ error: "Missing uid or adminToken" }, { status: 400 });
     }
+
+    const adminAuth = getAdminAuth();
 
     // Verify the admin token
     const decodedToken = await adminAuth.verifyIdToken(adminToken);
