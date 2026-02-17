@@ -23,4 +23,9 @@ export function getAdminAuth() {
 export function getAdminDb() {
   return admin.firestore();
 }
+
+// Named exports for convenience
+export const adminAuth = admin.auth();
+export const adminDb = admin.firestore();
+
 export default admin;

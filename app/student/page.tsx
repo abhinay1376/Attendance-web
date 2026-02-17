@@ -7,6 +7,7 @@ import { collection, onSnapshot, doc, setDoc, getDoc } from "firebase/firestore"
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL } from "@/lib/constants";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Calendar } from "@/components/ui/calendar";
@@ -14,7 +15,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PageTransition } from "@/components/page-transition";
-import { CalendarIcon, Info } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Collapsible } from "@/components/ui/collapsible";
+import { CalendarIcon, Info, LogOut, AlertTriangle, CheckCircle, XCircle, LayoutDashboard, BookOpen, History, Menu, X } from "lucide-react";
 import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -53,7 +56,7 @@ function sectionNameToLetter(sectionName: string): string {
 
 export default function StudentPage() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, role, loading, profileLoading } = useAuth();
 
   const [sectionTimetable, setSectionTimetable] = useState<SectionTimetable>({});
   const [slotsForDate, setSlotsForDate] = useState<TimetableSlot[]>([]);
@@ -68,20 +71,27 @@ export default function StudentPage() {
   const [isApproved, setIsApproved] = useState<boolean>(false);
   const [sectionLetter, setSectionLetter] = useState<string>("");
   const [pageLoading, setPageLoading] = useState(true);
+  const [allowFutureAttendance, setAllowFutureAttendance] = useState<boolean>(false);
+  const [allowBackdatedAttendance, setAllowBackdatedAttendance] = useState<boolean>(false);
+  const [userName, setUserName] = useState<string>("");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [currentSection, setCurrentSection] = useState("overview");
 
   const selectedDateStr = format(selectedDate, "yyyy-MM-dd");
   const today = format(new Date(), "yyyy-MM-dd");
   const isToday = selectedDateStr === today;
 
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push("/login");
-      } else if (user.email === ADMIN_EMAIL) {
-        router.push("/admin");
-      }
+    if (loading || profileLoading) return;
+
+    if (!user) {
+      router.replace("/login");
+    } else if (role === "admin") {
+      router.replace("/admin");
+    } else if (role !== "student") {
+      router.replace("/pending-approval");
     }
-  }, [user, loading, router]);
+  }, [user, role, loading, profileLoading, router]);
 
   // Check approval, section, backdated permission, and initial attendance (real-time)
   useEffect(() => {
@@ -96,7 +106,6 @@ export default function StudentPage() {
       const data = docSnap.data();
 
       if (!data.sectionId) {
-        console.warn("User has no section assigned");
         router.push("/pending-approval");
         return;
       }
@@ -112,6 +121,11 @@ export default function StudentPage() {
       if (data.initialAttendance) {
         setInitialAttendance(data.initialAttendance);
       }
+
+      // Set user name and permissions
+      setUserName(data.name || "");
+      setAllowFutureAttendance(data.allowFutureAttendance === true);
+      setAllowBackdatedAttendance(data.allowBackdatedAttendance === true);
 
       // Resolve section letter from sections collection
       const sectionDoc = await getDoc(doc(db, "sections", data.sectionId));
@@ -226,9 +240,18 @@ export default function StudentPage() {
     if (!user) return;
 
     // Validate date
-    if (selectedDateStr > today) {
+    if (selectedDateStr > today && !allowFutureAttendance) {
       alert("Cannot mark attendance for future dates.");
       return;
+    }
+    // Limit to 7 days ahead
+    if (selectedDateStr > today && allowFutureAttendance) {
+      const maxFutureDate = new Date();
+      maxFutureDate.setDate(maxFutureDate.getDate() + 7);
+      if (new Date(selectedDateStr) > maxFutureDate) {
+        alert("Cannot mark attendance more than 7 days in advance.");
+        return;
+      }
     }
     if (holidays.has(selectedDateStr)) {
       alert("Cannot mark attendance on a holiday.");
@@ -262,19 +285,19 @@ export default function StudentPage() {
     }
   };
 
-  if (loading || pageLoading) {
+  if (loading || profileLoading || pageLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-background">
         <LoadingSpinner size="lg" />
       </div>
     );
   }
 
-  if (!user || user.email === ADMIN_EMAIL) {
+  if (!user || role === "admin") {
     return null;
   }
 
-  if (!isApproved) {
+  if (role !== "student") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
         <LoadingSpinner size="lg" />
@@ -286,8 +309,14 @@ export default function StudentPage() {
   const cutoffDate = initialAttendance ? new Date(initialAttendance.uptoDate) : null;
   const isDateDisabled = (date: Date) => {
     const dateStr = format(date, "yyyy-MM-dd");
-    // Future dates always disabled
-    if (dateStr > today) return true;
+    // Future dates disabled UNLESS allowFutureAttendance is true
+    if (dateStr > today && !allowFutureAttendance) return true;
+    // Limit future dates to 7 days ahead even with permission
+    if (dateStr > today && allowFutureAttendance) {
+      const maxFutureDate = new Date();
+      maxFutureDate.setDate(maxFutureDate.getDate() + 7);
+      if (date > maxFutureDate) return true;
+    }
     // Dates on or before cutoff disabled
     if (cutoffDate && dateStr <= format(cutoffDate, "yyyy-MM-dd")) return true;
     // Holidays disabled
@@ -316,215 +345,293 @@ export default function StudentPage() {
     : 0;
   const appPercentage = appTotal > 0 ? Math.round(((appAttended / appTotal) * 100) * 100) / 100 : 0;
 
+  const menuItems = [
+    { id: "overview", label: "Overview", icon: LayoutDashboard },
+    { id: "attendance", label: "Mark Attendance", icon: BookOpen },
+    { id: "history", label: "History", icon: History },
+  ];
+
   return (
     <PageTransition>
-      <div className="min-h-screen page-background p-4">
-        <div className="mx-auto max-w-6xl space-y-6 py-8 perspective-container">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Attendance</h1>
-            <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
-              Logged in as {user.email}
-            </p>
+      <div className="min-h-screen page-background">
+        {/* ─── TOP NAVIGATION BAR ─── */}
+        <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80 dark:border-neutral-800 dark:bg-neutral-950/95">
+          <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4">
+            <div className="flex items-center gap-3">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="lg:hidden"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              >
+                {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+              </Button>
+              <h1 className="text-lg font-bold">Attendance</h1>
+              {allowFutureAttendance && (
+                <Badge variant="warning" className="hidden sm:inline-flex">
+                  <AlertTriangle className="h-3 w-3 mr-1" />
+                  Future Enabled
+                </Badge>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="hidden text-sm text-neutral-600 dark:text-neutral-400 md:block">
+                {userName || user.email}
+              </span>
+              <Button variant="outline" size="sm" onClick={handleSignOut}>
+                <LogOut className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </Button>
+            </div>
           </div>
-          <Button onClick={handleSignOut} variant="outline">
-            Sign Out
-          </Button>
-        </div>
+        </header>
 
-        {/* Attendance Summary */}
-        <Card elevation={3}>
-          <CardHeader>
-            <CardTitle>Attendance Summary</CardTitle>
-            <CardDescription>Your complete attendance record</CardDescription>
+        <div className="mx-auto max-w-6xl">
+          <div className="flex">
+            {/* ─── DESKTOP SIDEBAR ─── */}
+            <aside className="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-48 shrink-0 overflow-y-auto border-r border-neutral-200 p-4 dark:border-neutral-800 lg:block">
+              <nav className="space-y-1">
+                {menuItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = currentSection === item.id;
+                  return (
+                    <a
+                      key={item.id}
+                      href={`#${item.id}`}
+                      onClick={() => setCurrentSection(item.id)}
+                      className={cn(
+                        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        isActive
+                          ? "bg-primary/10 text-primary"
+                          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
+                      )}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {item.label}
+                    </a>
+                  );
+                })}
+              </nav>
+            </aside>
+
+            {/* ─── MOBILE SIDEBAR ─── */}
+            <AnimatePresence>
+              {mobileMenuOpen && (
+                <>
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-40 bg-black/50 lg:hidden"
+                    onClick={() => setMobileMenuOpen(false)}
+                  />
+                  <motion.aside
+                    initial={{ x: -256 }}
+                    animate={{ x: 0 }}
+                    exit={{ x: -256 }}
+                    transition={{ type: "spring", damping: 25, stiffness: 200 }}
+                    className="fixed left-0 top-14 z-50 h-[calc(100vh-3.5rem)] w-64 border-r border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950 lg:hidden"
+                  >
+                    <nav className="space-y-1">
+                      {menuItems.map((item) => {
+                        const Icon = item.icon;
+                        const isActive = currentSection === item.id;
+                        return (
+                          <a
+                            key={item.id}
+                            href={`#${item.id}`}
+                            onClick={() => {
+                              setCurrentSection(item.id);
+                              setMobileMenuOpen(false);
+                            }}
+                            className={cn(
+                              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                              isActive
+                                ? "bg-primary/10 text-primary"
+                                : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
+                            )}
+                          >
+                            <Icon className="h-4 w-4" />
+                            {item.label}
+                          </a>
+                        );
+                      })}
+                    </nav>
+                  </motion.aside>
+                </>
+              )}
+            </AnimatePresence>
+
+            {/* ─── MAIN CONTENT ─── */}
+            <main className="flex-1 p-4 lg:p-6">
+              <div className="space-y-6">
+
+        {/* Future Attendance Warning */}
+        {allowFutureAttendance && (
+          <Alert className="border-amber-300 bg-amber-50 dark:border-amber-800 dark:bg-amber-950/50">
+            <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+            <AlertDescription className="ml-7 text-sm text-amber-800 dark:text-amber-200">
+              <strong>Future Attendance Enabled:</strong> You can mark attendance up to 7 days in advance. 
+              This permission may be revoked at any time.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {/* ─── OVERVIEW SECTION ─── */}
+        <section id="overview">
+        {/* Attendance Summary - Compact for mobile */}
+        <Card elevation={2}>
+          <CardHeader className="p-3 sm:p-6 pb-2 sm:pb-2">
+            <CardTitle className="text-base sm:text-lg">Attendance Summary</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0">
+            <div className="grid grid-cols-3 gap-2 sm:gap-3">
               {/* Before App */}
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">
-                  Before App
-                </h3>
+              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-2 sm:p-3 dark:border-neutral-800 dark:bg-neutral-900">
+                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">Before</p>
                 {initialAttendance ? (
-                  <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
-                    <p className="text-2xl font-bold text-foreground">
-                      {initialAttendance.attended} / {initialAttendance.total}
+                  <>
+                    <p className="text-sm sm:text-lg font-bold">
+                      {initialAttendance.attended}/{initialAttendance.total}
                     </p>
-                    <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                      {initialPercentage.toFixed(2)}% attendance
+                    <p className="text-[10px] sm:text-xs text-neutral-500">
+                      {initialPercentage.toFixed(0)}%
                     </p>
-                    <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-1">
-                      Up to {new Date(initialAttendance.uptoDate).toLocaleDateString()}
-                    </p>
-                  </div>
+                  </>
                 ) : (
-                  <p className="text-sm text-neutral-500 dark:text-neutral-400">
-                    Not set yet
-                  </p>
+                  <p className="text-xs sm:text-sm text-neutral-400">N/A</p>
                 )}
               </div>
 
               {/* Using App */}
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">
-                  Using App
-                </h3>
-                <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
-                  <p className="text-2xl font-bold text-foreground">
-                    {appAttended} / {appTotal}
-                  </p>
-                  <p className="text-sm text-neutral-600 dark:text-neutral-400">
-                    {appPercentage.toFixed(2)}% attendance
-                  </p>
-                </div>
+              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-2 sm:p-3 dark:border-neutral-800 dark:bg-neutral-900">
+                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">App</p>
+                <p className="text-sm sm:text-lg font-bold">{appAttended}/{appTotal}</p>
+                <p className="text-[10px] sm:text-xs text-neutral-500">{appPercentage.toFixed(0)}%</p>
               </div>
 
               {/* Overall */}
-              <div className="space-y-2">
-                <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">
-                  Overall
-                </h3>
-                <div className="rounded-lg border-2 border-primary bg-primary/5 p-4">
-                  <p className="text-2xl font-bold text-foreground">
-                    {totalAttended} / {totalClasses}
-                  </p>
-                  <p className={`text-sm font-semibold ${overallPercentage >= 75 ? "text-green-600 dark:text-green-500" : "text-red-600 dark:text-red-500"}`}>
-                    {overallPercentage.toFixed(2)}% attendance
-                  </p>
-                </div>
+              <div className={cn(
+                "rounded-lg border-2 p-2 sm:p-3",
+                overallPercentage >= 75 
+                  ? "border-green-500 bg-green-50 dark:bg-green-950/30" 
+                  : "border-red-500 bg-red-50 dark:bg-red-950/30"
+              )}>
+                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">Total</p>
+                <p className="text-sm sm:text-lg font-bold">{totalAttended}/{totalClasses}</p>
+                <p className={cn(
+                  "text-[10px] sm:text-xs font-semibold",
+                  overallPercentage >= 75 ? "text-green-600" : "text-red-600"
+                )}>
+                  {overallPercentage.toFixed(0)}%
+                </p>
               </div>
             </div>
           </CardContent>
         </Card>
+        </section>
 
-        {/* Date Selection */}
-        <Card elevation={3}>
-          <CardHeader>
-            <CardTitle>Select Date</CardTitle>
-            <CardDescription>
-              Choose a date to mark your attendance
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Helper text about date restrictions */}
-            {initialAttendance && (
-              <Alert className="border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950">
-                <Info className="h-4 w-4 text-blue-600 dark:text-blue-400" />
-                <AlertDescription className="ml-7 text-sm text-blue-800 dark:text-blue-200">
-                  Attendance before{" "}
-                  <strong>{format(new Date(initialAttendance.uptoDate), "MMMM d, yyyy")}</strong>{" "}
-                  is already counted.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            <div className="flex flex-col gap-4">
-              <div className="space-y-2">
-                <label 
-                  htmlFor="date-picker" 
-                  className="text-sm font-medium text-neutral-700 dark:text-neutral-200"
+        {/* ─── MARK ATTENDANCE SECTION ─── */}
+        <section id="attendance">
+        {/* Compact Date Selection */}
+        <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Date:</span>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-3 text-sm font-normal"
                 >
-                  Attendance Date
-                </label>
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <Button
-                      id="date-picker"
-                      variant="outline"
-                      className="justify-start text-left font-normal w-fit h-9 px-3 text-sm"
-                      aria-label="Select attendance date"
-                    >
-                      <CalendarIcon className="mr-2 h-4 w-4" />
-                      {format(selectedDate, "EEE, MMM d, yyyy")}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-auto p-0" align="start" sideOffset={8}>
-                    <Calendar
-                      mode="single"
-                      selected={selectedDate}
-                      onSelect={(date) => {
-                        if (date && !isDateDisabled(date)) {
-                          setSelectedDate(date);
-                        }
-                      }}
-                      disabled={isDateDisabled}
-                      initialFocus
-                      className="rounded-md border-0 [--cell-size:36px]"
-                    />
-                  </PopoverContent>
-                </Popover>
+                  <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+                  {format(selectedDate, "EEE, MMM d")}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-0" align="start" sideOffset={4}>
+                <Calendar
+                  mode="single"
+                  selected={selectedDate}
+                  onSelect={(date) => {
+                    if (date && !isDateDisabled(date)) {
+                      setSelectedDate(date);
+                    }
+                  }}
+                  disabled={isDateDisabled}
+                  initialFocus
+                  className="rounded-md border-0"
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
+          
+          {/* Date status badges */}
+          {isToday ? (
+            <Badge variant="success">Today</Badge>
+          ) : isFutureDate && allowFutureAttendance ? (
+            <Badge variant="warning">
+              <AlertTriangle className="h-3 w-3 mr-1" />
+              Future
+            </Badge>
+          ) : isPastDate ? (
+            <Badge variant="info">{format(selectedDate, "MMM d")}</Badge>
+          ) : null}
+        </div>
 
-                {/* Date status badge */}
-                <div className="flex items-center gap-2">
-                  {isToday ? (
-                    <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800 dark:bg-green-900/30 dark:text-green-400">
-                      Today&apos;s attendance
-                    </span>
-                  ) : isPastDate ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800 dark:bg-blue-900/30 dark:text-blue-400">
-                      Attendance for {format(selectedDate, "MMM d, yyyy")}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-
-              {/* Error message for invalid dates */}
-              {!isSelectedDateValid && (
-                <Alert variant="destructive">
-                  <Info className="h-4 w-4" />
-                  <AlertDescription className="ml-7">
-                    {isFutureDate
-                      ? "You cannot mark attendance for future dates."
-                      : isHoliday
-                      ? `This day is marked as a holiday. Reason: ${holidayReasons.get(selectedDateStr) || "Holiday"}`
-                      : isSunday
-                      ? "Sundays are not valid for attendance."
-                      : cutoffDate && selectedDateStr <= format(cutoffDate, "yyyy-MM-dd")
-                      ? `This date is before the cutoff date (${format(cutoffDate, "MMMM d, yyyy")}). Attendance is already counted.`
-                      : "The selected date is not valid for attendance."}
-                  </AlertDescription>
-                </Alert>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+        {/* Error for invalid dates */}
+        {!isSelectedDateValid && (
+          <Alert variant="destructive" className="mb-4">
+            <Info className="h-4 w-4" />
+            <AlertDescription className="ml-7 text-sm">
+              {isFutureDate && !allowFutureAttendance
+                ? "Cannot mark future dates. Contact admin for permission."
+                : isFutureDate && allowFutureAttendance
+                ? "Future attendance limited to 7 days ahead."
+                : isHoliday
+                ? `Holiday: ${holidayReasons.get(selectedDateStr) || "Holiday"}`
+                : isSunday
+                ? "Sundays are not valid."
+                : cutoffDate && selectedDateStr <= format(cutoffDate, "yyyy-MM-dd")
+                ? `Before cutoff (${format(cutoffDate, "MMM d")})`
+                : "Invalid date."}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {/* Period Cards */}
         <div>
-          <h2 className="text-xl font-semibold mb-4">
+          <h2 className="text-base sm:text-lg font-semibold mb-2 sm:mb-3">
             {isToday
               ? `Today's Classes (${selectedDayName})`
-              : `Classes for ${format(selectedDate, "MMMM d, yyyy")} (${selectedDayName})`}
+              : `${format(selectedDate, "MMM d")} (${selectedDayName})`}
           </h2>
-
-
 
           {!isSelectedDateValid ? (
             <Card>
-              <CardContent className="py-12 text-center">
-                <Info className="mx-auto h-12 w-12 text-neutral-400 dark:text-neutral-600 mb-4" />
-                <p className="text-base font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+              <CardContent className="py-8 sm:py-12 text-center">
+                <Info className="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-neutral-400 dark:text-neutral-600 mb-3 sm:mb-4" />
+                <p className="text-sm sm:text-base font-medium text-neutral-700 dark:text-neutral-300 mb-1 sm:mb-2">
                   Cannot Mark Attendance
                 </p>
-                <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                <p className="text-xs sm:text-sm text-neutral-500 dark:text-neutral-400">
                   Please select a valid date from the calendar above.
                 </p>
               </CardContent>
             </Card>
           ) : slotsForDate.length === 0 ? (
             <Card>
-              <CardContent className="py-12 text-center">
-                <Info className="mx-auto h-12 w-12 text-neutral-400 dark:text-neutral-600 mb-4" />
-                <p className="text-base font-medium text-neutral-700 dark:text-neutral-300 mb-2">
+              <CardContent className="py-8 sm:py-12 text-center">
+                <Info className="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-neutral-400 dark:text-neutral-600 mb-3 sm:mb-4" />
+                <p className="text-sm sm:text-base font-medium text-neutral-700 dark:text-neutral-300 mb-1 sm:mb-2">
                   No Classes Scheduled
                 </p>
-                <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                <p className="text-xs sm:text-sm text-neutral-500 dark:text-neutral-400">
                   Your timetable shows no classes for {selectedDayName}.
                 </p>
               </CardContent>
             </Card>
           ) : (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {slotsForDate.map((slot, index) => {
                 const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
                 const isSubmitted = !!attendance[slotKey];
@@ -539,10 +646,10 @@ export default function StudentPage() {
                 return (
                   <div key={slotKey} className={fadeClass}>
                     <Card elevation={3}>
-                      <CardHeader>
-                        <CardTitle className="text-lg">
-                          {slot.start} – {slot.end}
-                          <span className="ml-2 text-sm font-normal text-blue-600 dark:text-blue-400">
+                      <CardHeader className="p-3 sm:p-6 pb-2 sm:pb-3">
+                        <CardTitle className="text-sm sm:text-lg flex flex-wrap items-center gap-1">
+                          <span>{slot.start} – {slot.end}</span>
+                          <span className="text-xs sm:text-sm font-normal text-blue-600 dark:text-blue-400">
                             ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
                           </span>
                         </CardTitle>
@@ -570,7 +677,7 @@ export default function StudentPage() {
                           )}
                         </AnimatePresence>
                       </CardHeader>
-                      <CardContent className="space-y-4">
+                      <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0 space-y-3 sm:space-y-4">
                         <AnimatePresence mode="wait">
                           {isSubmitted ? (
                             <motion.div
@@ -579,22 +686,25 @@ export default function StudentPage() {
                               animate={{ opacity: 1 }}
                               exit={{ opacity: 0 }}
                               transition={{ duration: 0.2 }}
-                              className="space-y-3"
+                              className="space-y-2 sm:space-y-3"
                             >
-                              <p className="text-sm text-neutral-600 dark:text-neutral-400">
+                              <p className="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
                                 Subject:{" "}
                                 <span className="font-medium text-neutral-900 dark:text-neutral-50">
                                   {slot.subject}
                                 </span>
                               </p>
-                              <p className="text-xs text-neutral-500 dark:text-neutral-400">
+                              <p className="text-[10px] sm:text-xs text-neutral-500 dark:text-neutral-400">
                                 Submitted at {new Date(record.timestamp).toLocaleTimeString()}
                               </p>
                               <div className="flex gap-2 pt-1">
                                 <Button
                                   size="sm"
                                   variant={record.status === "PRESENT" ? "outline" : "default"}
-                                  className={record.status !== "PRESENT" ? "bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800" : ""}
+                                  className={cn(
+                                    "h-8 text-xs sm:h-9 sm:text-sm",
+                                    record.status !== "PRESENT" ? "bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800" : ""
+                                  )}
                                   onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
                                   disabled={submitting[slotKey] || record.status === "PRESENT"}
                                 >
@@ -603,7 +713,10 @@ export default function StudentPage() {
                                 <Button
                                   size="sm"
                                   variant={record.status === "ABSENT" ? "outline" : "default"}
-                                  className={record.status !== "ABSENT" ? "bg-red-600 hover:bg-red-700 text-white dark:bg-red-700 dark:hover:bg-red-800" : ""}
+                                  className={cn(
+                                    "h-8 text-xs sm:h-9 sm:text-sm",
+                                    record.status !== "ABSENT" ? "bg-red-600 hover:bg-red-700 text-white dark:bg-red-700 dark:hover:bg-red-800" : ""
+                                  )}
                                   onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
                                   disabled={submitting[slotKey] || record.status === "ABSENT"}
                                 >
@@ -618,20 +731,20 @@ export default function StudentPage() {
                               animate={{ opacity: 1 }}
                               exit={{ opacity: 0 }}
                               transition={{ duration: 0.2 }}
-                              className="space-y-4"
+                              className="space-y-3 sm:space-y-4"
                             >
-                              <div className="space-y-2">
-                                <p className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
+                              <div className="space-y-1 sm:space-y-2">
+                                <p className="text-xs sm:text-sm font-medium text-neutral-700 dark:text-neutral-200">
                                   Subject
                                 </p>
-                                <p className="text-sm text-neutral-900 dark:text-neutral-50 font-medium">
+                                <p className="text-xs sm:text-sm text-neutral-900 dark:text-neutral-50 font-medium">
                                   {slot.subject}
                                 </p>
                               </div>
 
                               <div className="flex gap-2">
                                 <Button
-                                  className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[44px] dark:bg-green-700 dark:hover:bg-green-800"
+                                  className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[40px] sm:min-h-[44px] text-xs sm:text-sm dark:bg-green-700 dark:hover:bg-green-800"
                                   onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
                                   disabled={submitting[slotKey]}
                                   aria-label={`Mark present for ${slot.start}–${slot.end}`}
@@ -643,7 +756,7 @@ export default function StudentPage() {
                                   )}
                                 </Button>
                                 <Button
-                                  className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[44px] dark:bg-red-700 dark:hover:bg-red-800"
+                                  className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[40px] sm:min-h-[44px] text-xs sm:text-sm dark:bg-red-700 dark:hover:bg-red-800"
                                   onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
                                   disabled={submitting[slotKey]}
                                   aria-label={`Mark absent for ${slot.start}–${slot.end}`}
@@ -665,6 +778,11 @@ export default function StudentPage() {
               })}
                 </div>
               )}
+          </div>
+        </section>
+
+              </div>
+            </main>
           </div>
         </div>
       </div>

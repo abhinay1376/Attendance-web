@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, setDoc, getDoc, writeBatch, query, where } from "firebase/firestore";
+import { collection, addDoc, getDocs, deleteDoc, doc, onSnapshot, setDoc, getDoc, writeBatch, query, where, orderBy, limit } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL, WEEKDAYS } from "@/lib/constants";
@@ -16,8 +16,14 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PageTransition } from "@/components/page-transition";
-import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX } from "lucide-react";
+import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings } from "lucide-react";
 import { format } from "date-fns";
+import { motion, AnimatePresence } from "framer-motion";
+import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
+import { Collapsible } from "@/components/ui/collapsible";
+import { SearchInput, SortSelect } from "@/components/ui/search-filter";
+import { NotificationBell, NotificationPanel, Notification } from "@/components/ui/notification";
 
 interface Subject {
   id: string;
@@ -39,6 +45,7 @@ interface StudentInfo {
   phone?: string;
   approved?: boolean;
   allowBackdatedAttendance?: boolean;
+  allowFutureAttendance?: boolean;
   initialAttendance?: {
     attended: number;
     total: number;
@@ -101,7 +108,7 @@ function sectionNameToLetter(sectionName: string): string {
 
 export default function AdminPage() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, role, loading, profileLoading } = useAuth();
 
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [periods, setPeriods] = useState<Period[]>([]);
@@ -226,15 +233,36 @@ export default function AdminPage() {
   const [resetConfirmText, setResetConfirmText] = useState("");
   const [isResetting, setIsResetting] = useState(false);
 
+  // ─── NEW: Navigation & UI State ───
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [currentSection, setCurrentSection] = useState("dashboard");
+
+  // ─── NEW: Notifications State ───
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // ─── NEW: Search, Filter & Sort State (per section) ───
+  const [pendingSearch, setPendingSearch] = useState("");
+  const [pendingSort, setPendingSort] = useState<"name" | "date">("name");
+  const [approvedSearch, setApprovedSearch] = useState("");
+  const [approvedSort, setApprovedSort] = useState<"name" | "attendance">("attendance");
+  const [rejectedSearch, setRejectedSearch] = useState("");
+  const [rejectedSort, setRejectedSort] = useState<"name" | "date">("name");
+  const [attendanceSearchQuery, setAttendanceSearchQuery] = useState("");
+  const [attendanceSort, setAttendanceSort] = useState<"name" | "percentage">("percentage");
+
+  // ─── NEW: Restore user state ───
+  const [restoringUser, setRestoringUser] = useState<string | null>(null);
+
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push("/login");
-      } else if (user.email !== ADMIN_EMAIL) {
-        router.push("/student");
-      }
+    if (loading || profileLoading) return;
+
+    if (!user) {
+      router.replace("/login");
+    } else if (role !== "admin") {
+      router.replace("/student");
     }
-  }, [user, loading, router]);
+  }, [user, role, loading, profileLoading, router]);
 
   // Listen to subjects collection
   useEffect(() => {
@@ -328,11 +356,30 @@ export default function AdminPage() {
             phone: data.phone,
             approved: data.approved,
             allowBackdatedAttendance: data.allowBackdatedAttendance,
+            allowFutureAttendance: data.allowFutureAttendance,
             initialAttendance: data.initialAttendance,
           });
         }
       });
       setStudents(studentsData);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // ─── NEW: Listen to notifications ───
+  useEffect(() => {
+    if (!user || user.email !== ADMIN_EMAIL) return;
+
+    const notificationsRef = collection(db, "notifications");
+    const q = query(notificationsRef, orderBy("createdAt", "desc"), limit(50));
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const notifs: Notification[] = [];
+      snapshot.forEach((doc) => {
+        notifs.push({ id: doc.id, ...doc.data() } as Notification);
+      });
+      setNotifications(notifs);
     });
 
     return () => unsubscribe();
@@ -387,8 +434,8 @@ export default function AdminPage() {
         }
       },
       (error) => {
-        console.error("Timetable listener error:", error.message);
         // Firestore rules may be blocking — show empty state gracefully
+        void error;
         setTimetable({});
       }
     );
@@ -628,6 +675,69 @@ export default function AdminPage() {
     }
   };
 
+  // ─── NEW: Toggle Future Attendance Permission ───
+  const handleToggleFutureAttendance = async (uid: string, currentValue: boolean) => {
+    try {
+      const newValue = !currentValue;
+      await setDoc(doc(db, "users", uid), { allowFutureAttendance: newValue }, { merge: true });
+
+      await addDoc(collection(db, "auditLog"), {
+        action: newValue ? "FUTURE_ATTENDANCE_ENABLED" : "FUTURE_ATTENDANCE_DISABLED",
+        studentUid: uid,
+        performedBy: user?.email,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("Error toggling future attendance:", error);
+      alert("Error updating future attendance permission");
+    }
+  };
+
+  // ─── NEW: Restore Rejected User ───
+  const handleRestoreUser = async (uid: string) => {
+    if (!confirm("Restore this user to pending status?")) return;
+    setRestoringUser(uid);
+    try {
+      await setDoc(doc(db, "users", uid), { approved: null }, { merge: true });
+      
+      await addDoc(collection(db, "auditLog"), {
+        action: "USER_RESTORED",
+        studentUid: uid,
+        performedBy: user?.email,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      console.error("Error restoring user:", error);
+      alert("Error restoring user");
+    } finally {
+      setRestoringUser(null);
+    }
+  };
+
+  // ─── NEW: Notification Handlers ───
+  const handleNotificationClick = async (notification: Notification) => {
+    if (!notification.read) {
+      await setDoc(doc(db, "notifications", notification.id), { read: true }, { merge: true });
+    }
+    setShowNotifications(false);
+    // Scroll to users section
+    const usersSection = document.getElementById("users");
+    if (usersSection) {
+      usersSection.scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    const unread = notifications.filter((n) => !n.read);
+    if (unread.length === 0) return;
+
+    const batch = writeBatch(db);
+    unread.forEach((n) => {
+      batch.update(doc(db, "notifications", n.id), { read: true });
+    });
+    await batch.commit();
+  };
+
   const handleAddSection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sectionName.trim()) return;
@@ -815,38 +925,519 @@ export default function AdminPage() {
     }
   };
 
-  if (loading) {
+  if (loading || profileLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-background">
         <LoadingSpinner size="lg" />
       </div>
     );
   }
 
-  if (!user || user.email !== ADMIN_EMAIL) {
+  if (!user || role !== "admin") {
     return null;
   }
 
   const selectedStudent = students.find(s => s.uid === selectedStudentUid);
+  const unreadCount = notifications.filter((n) => !n.read).length;
+
+  // ─── Filter & Sort Logic (per section) ───
+  const filterBySearch = (s: StudentInfo, query: string) => {
+    if (query === "") return true;
+    const q = query.toLowerCase();
+    return (
+      s.name?.toLowerCase().includes(q) ||
+      s.regNo?.toLowerCase().includes(q) ||
+      s.email.toLowerCase().includes(q)
+    );
+  };
+
+  // Base lists
+  const allPending = students.filter(s => s.approved !== true && s.approved !== false);
+  const allApproved = students.filter(s => s.approved === true);
+  const allRejected = students.filter(s => s.approved === false);
+
+  // Filtered & sorted lists for display
+  const pendingStudents = [...allPending]
+    .filter(s => filterBySearch(s, pendingSearch))
+    .sort((a, b) => {
+      if (pendingSort === "name") return (a.name || "").localeCompare(b.name || "");
+      return 0;
+    });
+
+  const approvedStudents = [...allApproved]
+    .filter(s => filterBySearch(s, approvedSearch))
+    .sort((a, b) => {
+      if (approvedSort === "name") return (a.name || "").localeCompare(b.name || "");
+      if (approvedSort === "attendance") {
+        const attA = computeAttendance(a.initialAttendance, appAttendanceMap[a.uid] || { appAttended: 0, appTotal: 0 });
+        const attB = computeAttendance(b.initialAttendance, appAttendanceMap[b.uid] || { appAttended: 0, appTotal: 0 });
+        return attB.percentage - attA.percentage;
+      }
+      return 0;
+    });
+
+  const rejectedStudents = [...allRejected]
+    .filter(s => filterBySearch(s, rejectedSearch))
+    .sort((a, b) => {
+      if (rejectedSort === "name") return (a.name || "").localeCompare(b.name || "");
+      return 0;
+    });
+
+  const menuItems = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "users", label: "Users", icon: Users },
+    { id: "attendance", label: "Attendance", icon: BarChart3 },
+    { id: "timetable", label: "Timetable", icon: CalendarIcon },
+    { id: "settings", label: "Settings", icon: Settings },
+  ];
 
   return (
     <PageTransition>
-      <div className="min-h-screen page-background p-4">
-        <div className="mx-auto max-w-6xl space-y-6 py-8 perspective-container">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-            <p className="text-sm text-neutral-600 dark:text-neutral-400 mt-1">
-              Logged in as {user.email}
-            </p>
+      <div className="min-h-screen page-background">
+        {/* ─── TOP NAVIGATION BAR ─── */}
+        <header className="sticky top-0 z-30 border-b border-neutral-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80 dark:border-neutral-800 dark:bg-neutral-950/95">
+          <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4">
+            <div className="flex items-center gap-4">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="lg:hidden"
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+              >
+                {mobileMenuOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
+              </Button>
+              <h1 className="text-lg font-bold">Admin Dashboard</h1>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="relative">
+                <NotificationBell count={unreadCount} onClick={() => setShowNotifications(!showNotifications)} />
+                <NotificationPanel
+                  notifications={notifications}
+                  onNotificationClick={handleNotificationClick}
+                  onMarkAllRead={handleMarkAllNotificationsRead}
+                  onClose={() => setShowNotifications(false)}
+                  isOpen={showNotifications}
+                />
+              </div>
+              <span className="hidden text-sm text-neutral-600 dark:text-neutral-400 sm:block">
+                {user.email}
+              </span>
+              <Button variant="outline" size="sm" onClick={handleSignOut}>
+                <LogOut className="h-4 w-4 sm:mr-2" />
+                <span className="hidden sm:inline">Sign Out</span>
+              </Button>
+            </div>
           </div>
-          <Button onClick={handleSignOut} variant="outline">
-            Sign Out
-          </Button>
-        </div>
+        </header>
+
+        <div className="mx-auto max-w-7xl">
+          <div className="flex">
+            {/* ─── DESKTOP SIDEBAR ─── */}
+            <aside className="sticky top-14 hidden h-[calc(100vh-3.5rem)] w-56 shrink-0 overflow-y-auto border-r border-neutral-200 p-4 dark:border-neutral-800 lg:block">
+              <nav className="space-y-1">
+                {menuItems.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = currentSection === item.id;
+                  return (
+                    <a
+                      key={item.id}
+                      href={`#${item.id}`}
+                      onClick={() => setCurrentSection(item.id)}
+                      className={cn(
+                        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        isActive
+                          ? "bg-primary/10 text-primary"
+                          : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
+                      )}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {item.label}
+                    </a>
+                  );
+                })}
+              </nav>
+            </aside>
+
+            {/* ─── MOBILE SIDEBAR ─── */}
+            <AnimatePresence>
+              {mobileMenuOpen && (
+                <>
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="fixed inset-0 z-20 bg-black/50 lg:hidden"
+                    onClick={() => setMobileMenuOpen(false)}
+                  />
+                  <motion.aside
+                    initial={{ x: -256 }}
+                    animate={{ x: 0 }}
+                    exit={{ x: -256 }}
+                    transition={{ type: "spring", damping: 25, stiffness: 300 }}
+                    className="fixed left-0 top-14 z-20 h-[calc(100vh-3.5rem)] w-64 overflow-y-auto border-r border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950 lg:hidden"
+                  >
+                    <nav className="space-y-1">
+                      {menuItems.map((item) => {
+                        const Icon = item.icon;
+                        const isActive = currentSection === item.id;
+                        return (
+                          <a
+                            key={item.id}
+                            href={`#${item.id}`}
+                            onClick={() => {
+                              setCurrentSection(item.id);
+                              setMobileMenuOpen(false);
+                            }}
+                            className={cn(
+                              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                              isActive
+                                ? "bg-primary/10 text-primary"
+                                : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
+                            )}
+                          >
+                            <Icon className="h-4 w-4" />
+                            {item.label}
+                          </a>
+                        );
+                      })}
+                    </nav>
+                  </motion.aside>
+                </>
+              )}
+            </AnimatePresence>
+
+            {/* ─── MAIN CONTENT ─── */}
+            <main className="flex-1 p-3 sm:p-4 lg:p-6">
+              <div className="space-y-4 sm:space-y-6">
+
+        {/* ─── DASHBOARD SECTION ─── */}
+        <section id="dashboard">
+          <h2 className="text-xl font-bold mb-4 sm:text-2xl">Dashboard Overview</h2>
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 lg:grid-cols-4">
+            <Card elevation={2}>
+              <CardContent className="p-3 sm:pt-6 sm:p-6">
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <div className="rounded-lg bg-blue-100 p-1.5 sm:p-2 dark:bg-blue-900/30">
+                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl sm:text-2xl font-bold">{allPending.length}</p>
+                    <p className="text-[10px] sm:text-xs text-neutral-500">Pending</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card elevation={2}>
+              <CardContent className="p-3 sm:pt-6 sm:p-6">
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <div className="rounded-lg bg-green-100 p-1.5 sm:p-2 dark:bg-green-900/30">
+                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-green-600 dark:text-green-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl sm:text-2xl font-bold">{allApproved.length}</p>
+                    <p className="text-[10px] sm:text-xs text-neutral-500">Approved</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card elevation={2}>
+              <CardContent className="p-3 sm:pt-6 sm:p-6">
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <div className="rounded-lg bg-red-100 p-1.5 sm:p-2 dark:bg-red-900/30">
+                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-red-600 dark:text-red-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl sm:text-2xl font-bold">{allRejected.length}</p>
+                    <p className="text-[10px] sm:text-xs text-neutral-500">Rejected</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card elevation={2}>
+              <CardContent className="p-3 sm:pt-6 sm:p-6">
+                <div className="flex items-center gap-2 sm:gap-3">
+                  <div className="rounded-lg bg-purple-100 p-1.5 sm:p-2 dark:bg-purple-900/30">
+                    <Bell className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600 dark:text-purple-400" />
+                  </div>
+                  <div>
+                    <p className="text-xl sm:text-2xl font-bold">{unreadCount}</p>
+                    <p className="text-[10px] sm:text-xs text-neutral-500">Notifications</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        {/* ─── USERS SECTION ─── */}
+        <section id="users">
+          <h2 className="text-xl font-bold mb-4 sm:text-2xl">User Management</h2>
+
+          {/* Pending Users */}
+          <Collapsible
+            title="Pending Approvals"
+            count={allPending.length}
+            defaultOpen={allPending.length > 0 && allPending.length <= 10}
+            badge={allPending.length > 0 ? <Badge variant="warning">Action Required</Badge> : undefined}
+            className="mb-3"
+          >
+            {/* Search & Sort inside collapsible */}
+            {allPending.length > 0 && (
+              <div className="flex flex-col gap-2 mb-3 sm:flex-row sm:items-center sm:justify-between">
+                <SearchInput
+                  value={pendingSearch}
+                  onChange={setPendingSearch}
+                  placeholder="Search pending..."
+                  className="w-full sm:w-48"
+                />
+                <SortSelect
+                  options={[
+                    { value: "name", label: "Name" },
+                  ]}
+                  value={pendingSort}
+                  onChange={(v) => setPendingSort(v as "name" | "date")}
+                  className="w-full sm:w-auto"
+                />
+              </div>
+            )}
+            {pendingStudents.length === 0 ? (
+              <p className="text-center text-sm text-neutral-500 py-4">
+                {pendingSearch ? "No matching users" : "No pending approvals"}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {pendingStudents.map((student) => {
+                  const studentSection = student.sectionId ? sections.find(s => s.id === student.sectionId) : null;
+                  return (
+                    <div
+                      key={student.uid}
+                      className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 dark:border-neutral-700 dark:bg-neutral-900"
+                    >
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                          <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
+                        </div>
+                        <Badge variant="warning" className="shrink-0">Pending</Badge>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 text-xs mb-2">
+                        <div className="truncate"><span className="text-neutral-500">Branch:</span> {student.branch}</div>
+                        <div className="truncate"><span className="text-neutral-500">Section:</span> {studentSection?.name || "N/A"}</div>
+                        <div className="truncate col-span-2"><span className="text-neutral-500">Phone:</span> {student.phone}</div>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => handleApproveStudent(student.uid)}
+                          className="flex-1 h-8 text-xs bg-green-600 hover:bg-green-700 text-white"
+                        >
+                          Approve
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => handleRejectStudent(student.uid)}
+                          className="flex-1 h-8 text-xs"
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Collapsible>
+
+          {/* Approved Users */}
+          <Collapsible
+            title="Approved Students"
+            count={allApproved.length}
+            defaultOpen={false}
+            className="mb-3"
+          >
+            {/* Search & Sort inside collapsible */}
+            {allApproved.length > 0 && (
+              <div className="flex flex-col gap-2 mb-3 sm:flex-row sm:items-center sm:justify-between">
+                <SearchInput
+                  value={approvedSearch}
+                  onChange={setApprovedSearch}
+                  placeholder="Search approved..."
+                  className="w-full sm:w-48"
+                />
+                <SortSelect
+                  options={[
+                    { value: "name", label: "Name" },
+                    { value: "attendance", label: "Attendance %" },
+                  ]}
+                  value={approvedSort}
+                  onChange={(v) => setApprovedSort(v as "name" | "attendance")}
+                  className="w-full sm:w-auto"
+                />
+              </div>
+            )}
+            {approvedStudents.length === 0 ? (
+              <p className="text-center text-sm text-neutral-500 py-4">
+                {approvedSearch ? "No matching students" : "No approved students"}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {approvedStudents.map((student) => {
+                  const hasBackdated = student.allowBackdatedAttendance === true;
+                  const hasFuture = student.allowFutureAttendance === true;
+                  const att = computeAttendance(student.initialAttendance, appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 });
+
+                  return (
+                    <div
+                      key={student.uid}
+                      className="rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-700 dark:bg-neutral-900"
+                    >
+                      {/* Header row */}
+                      <div className="flex items-start justify-between gap-2 mb-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                          <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className={cn(
+                            "text-xs font-bold px-1.5 py-0.5 rounded",
+                            att.percentage >= 75 ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" 
+                            : att.percentage >= 50 ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
+                            : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                          )}>
+                            {att.percentage}%
+                          </span>
+                          <Button
+                            size="icon-xs"
+                            variant="ghost"
+                            onClick={() => {
+                              setDeleteUserUid(student.uid);
+                              setDeleteConfirmText("");
+                            }}
+                            title="Delete user"
+                            className="text-red-500 hover:text-red-600 hover:bg-red-50"
+                          >
+                            <UserX className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+
+                      {/* Attendance Bar */}
+                      <div className="h-1.5 rounded-full bg-neutral-200 dark:bg-neutral-700 overflow-hidden mb-2">
+                        <div
+                          className={cn(
+                            "h-full rounded-full transition-all",
+                            att.percentage >= 75 ? "bg-green-500" : att.percentage >= 50 ? "bg-yellow-500" : "bg-red-500"
+                          )}
+                          style={{ width: `${Math.min(att.percentage, 100)}%` }}
+                        />
+                      </div>
+
+                      {/* Permission Toggles - compact */}
+                      <div className="flex gap-1.5">
+                        <Button
+                          size="sm"
+                          variant={hasBackdated ? "default" : "outline"}
+                          className={cn("text-[10px] h-6 px-2 flex-1", hasBackdated && "bg-amber-600 hover:bg-amber-700")}
+                          onClick={() => handleToggleBackdatedAttendance(student.uid, hasBackdated)}
+                        >
+                          Backdate {hasBackdated ? "✓" : ""}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant={hasFuture ? "default" : "outline"}
+                          className={cn("text-[10px] h-6 px-2 flex-1", hasFuture && "bg-blue-600 hover:bg-blue-700")}
+                          onClick={() => handleToggleFutureAttendance(student.uid, hasFuture)}
+                        >
+                          Future {hasFuture ? "✓" : ""}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </Collapsible>
+
+          {/* Rejected Users */}
+          <Collapsible
+            title="Rejected Users"
+            count={allRejected.length}
+            defaultOpen={false}
+            badge={allRejected.length > 0 ? <Badge variant="error">Rejected</Badge> : undefined}
+            className="mb-3"
+          >
+            {/* Search & Sort inside collapsible */}
+            {allRejected.length > 0 && (
+              <div className="flex flex-col gap-2 mb-3 sm:flex-row sm:items-center sm:justify-between">
+                <SearchInput
+                  value={rejectedSearch}
+                  onChange={setRejectedSearch}
+                  placeholder="Search rejected..."
+                  className="w-full sm:w-48"
+                />
+                <SortSelect
+                  options={[
+                    { value: "name", label: "Name" },
+                  ]}
+                  value={rejectedSort}
+                  onChange={(v) => setRejectedSort(v as "name" | "date")}
+                  className="w-full sm:w-auto"
+                />
+              </div>
+            )}
+            {rejectedStudents.length === 0 ? (
+              <p className="text-center text-sm text-neutral-500 py-4">
+                {rejectedSearch ? "No matching users" : "No rejected users"}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {rejectedStudents.map((student) => (
+                  <div
+                    key={student.uid}
+                    className="rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-900 dark:bg-red-950/30"
+                  >
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                        <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
+                      </div>
+                      <Badge variant="error" className="shrink-0">Rejected</Badge>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRestoreUser(student.uid)}
+                        disabled={restoringUser === student.uid}
+                        className="flex-1 h-7 text-xs"
+                      >
+                        <RotateCcw className="h-3 w-3 mr-1" />
+                        {restoringUser === student.uid ? "..." : "Restore"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => {
+                          setDeleteUserUid(student.uid);
+                          setDeleteConfirmText("");
+                        }}
+                        className="flex-1 h-7 text-xs"
+                      >
+                        <Trash2 className="h-3 w-3 mr-1" />
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Collapsible>
+        </section>
 
         {/* Initial Attendance Section */}
-        <Card elevation={3}>
+        <Card elevation={3} id="initial-attendance">
           <CardHeader>
             <CardTitle>Set Initial Attendance</CardTitle>
             <CardDescription>
@@ -956,169 +1547,14 @@ export default function AdminPage() {
           </CardContent>
         </Card>
 
-        {/* Student Approval Section */}
-        <Card elevation={3}>
-          <CardHeader>
-            <CardTitle>Student Approvals</CardTitle>
-            <CardDescription>
-              Approve or reject student registrations
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {students.filter(s => s.approved !== true).length === 0 ? (
-              <p className="text-center text-sm text-neutral-500 dark:text-neutral-400 py-8">
-                No pending approvals
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {students
-                  .filter(s => s.approved !== true)
-                  .map((student) => {
-                    const studentSection = student.sectionId ? sections.find(s => s.id === student.sectionId) : null;
-                    return (
-                    <div
-                      key={student.uid}
-                      className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900"
-                    >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex-1">
-                          <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
-                            {student.name || "No Name"}
-                          </p>
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 font-mono">
-                            {student.regNo || "No Reg No"}
-                          </p>
-                        </div>
-                        <div className="inline-flex items-center gap-2 rounded-full bg-yellow-100 px-3 py-1 dark:bg-yellow-900/30">
-                          <span className="h-2 w-2 rounded-full bg-yellow-500"></span>
-                          <span className="text-xs font-semibold text-yellow-700 dark:text-yellow-500">
-                            Pending
-                          </span>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-3 mb-3">
-                        <div>
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400">Branch</p>
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                            {student.branch || "N/A"}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400">Section</p>
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                            {studentSection?.name || "N/A"}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400">Phone</p>
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                            {student.phone || "N/A"}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-neutral-500 dark:text-neutral-400">Email</p>
-                          <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50 truncate">
-                            {student.email}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          onClick={() => handleApproveStudent(student.uid)}
-                          className="flex-1 bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800"
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => handleRejectStudent(student.uid)}
-                          className="flex-1"
-                        >
-                          Reject
-                        </Button>
-                      </div>
-                    </div>
-                    );
-                  })}
-              </div>
-            )}
+        {/* Student Approval Section - REMOVED, now in collapsible Users section above */}
 
-            {students.filter(s => s.approved === true).length > 0 && (
-              <div className="mt-6 pt-6 border-t border-neutral-200 dark:border-neutral-800">
-                <h3 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300 mb-3">
-                  Approved Students
-                </h3>
-                <div className="space-y-2">
-                  {students
-                    .filter(s => s.approved === true)
-                    .map((student) => {
-                      const studentSection = student.sectionId ? sections.find(sec => sec.id === student.sectionId) : null;
-                      const hasBackdated = student.allowBackdatedAttendance === true;
-                      return (
-                      <div
-                        key={student.uid}
-                        className="rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800 dark:bg-green-950"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <div className="h-2 w-2 rounded-full bg-green-500"></div>
-                            <div>
-                              <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                                {student.name || student.email}
-                              </p>
-                              {student.regNo && (
-                                <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
-                                  {student.regNo}{studentSection ? ` • ${studentSection.name}` : ''}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-green-600 dark:text-green-500">
-                              Approved
-                            </span>
-                            <Button
-                              size="sm"
-                              variant="destructive"
-                              onClick={() => {
-                                setDeleteUserUid(student.uid);
-                                setDeleteConfirmText("");
-                              }}
-                              title="Delete user"
-                            >
-                              <UserX className="h-3 w-3" />
-                            </Button>
-                          </div>
-                        </div>
-                        {/* Backdated attendance toggle */}
-                        <div className="mt-2 flex items-center justify-between pl-5">
-                          <span className="text-xs text-neutral-600 dark:text-neutral-400">
-                            Backdated attendance
-                          </span>
-                          <Button
-                            size="sm"
-                            variant={hasBackdated ? "default" : "outline"}
-                            className={`text-xs h-6 px-2 ${hasBackdated ? "bg-amber-600 hover:bg-amber-700 dark:bg-amber-700 dark:hover:bg-amber-800" : ""}`}
-                            onClick={() => handleToggleBackdatedAttendance(student.uid, hasBackdated)}
-                          >
-                            {hasBackdated ? "Enabled" : "Disabled"}
-                          </Button>
-                        </div>
-                      </div>
-                      );
-                    })}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* ─── STUDENT ATTENDANCE OVERVIEW ─── */}
-        <Card elevation={3}>
+        {/* ─── ATTENDANCE OVERVIEW SECTION ─── */}
+        <section id="attendance">
+          <h2 className="text-xl font-bold mb-4 sm:text-2xl">Attendance Overview</h2>
+          <Card elevation={3}>
           <CardHeader>
-            <CardTitle>Student Attendance Overview</CardTitle>
+            <CardTitle>Student Attendance</CardTitle>
             <CardDescription>
               Real-time attendance for all approved students (Initial + App = Total)
             </CardDescription>
@@ -1128,88 +1564,131 @@ export default function AdminPage() {
               <div className="flex items-center justify-center py-8">
                 <LoadingSpinner size="md" />
               </div>
-            ) : students.filter(s => s.approved === true).length === 0 ? (
-              <p className="text-center text-sm text-neutral-500 dark:text-neutral-400 py-8">
-                No approved students yet
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {students
-                  .filter(s => s.approved === true)
-                  .map((student, idx) => {
-                    const app = appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 };
-                    const att = computeAttendance(student.initialAttendance, app);
-                    const studentSection = student.sectionId ? sections.find(sec => sec.id === student.sectionId) : null;
-                    const barColor = att.totalClasses === 0 ? 'bg-neutral-300 dark:bg-neutral-600'
-                      : att.percentage >= 75 ? 'bg-green-500' : att.percentage >= 50 ? 'bg-yellow-500' : 'bg-red-500';
-
-                    return (
-                      <div
-                        key={student.uid}
-                        className={`rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900 animate-fade-in${idx < 5 ? `-delay-${idx + 1}` : ''}`}
-                      >
-                        {/* Student header */}
-                        <div className="flex items-start justify-between mb-3">
-                          <div>
-                            <p className="text-sm font-semibold text-neutral-900 dark:text-neutral-50">
-                              {student.name || student.email}
-                            </p>
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
-                              {student.regNo || student.email}
-                              {studentSection ? ` • ${studentSection.name}` : ''}
-                            </p>
-                          </div>
-                          <div className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${
-                            att.totalClasses === 0
-                              ? 'bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400'
-                              : att.percentage >= 75
-                              ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400'
-                              : att.percentage >= 50
-                              ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400'
-                              : 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400'
-                          }`}>
-                            {att.totalClasses > 0 ? `${att.percentage.toFixed(2)}%` : 'No data'}
-                          </div>
-                        </div>
-
-                        {/* Progress bar */}
-                        {att.totalClasses > 0 && (
-                          <div className="w-full h-2 bg-neutral-200 dark:bg-neutral-700 rounded-full mb-3 overflow-hidden">
-                            <div
-                              className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                              style={{ width: `${Math.min(att.percentage, 100)}%` }}
-                            />
-                          </div>
-                        )}
-
-                        {/* Breakdown row */}
-                        <div className="grid grid-cols-3 gap-3 text-center">
-                          <div className="rounded-md bg-neutral-50 p-2 dark:bg-neutral-800">
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400">Initial</p>
-                            <p className="text-sm font-bold text-neutral-900 dark:text-neutral-50">
-                              {att.initialAttended}/{att.initialTotal}
-                            </p>
-                          </div>
-                          <div className="rounded-md bg-neutral-50 p-2 dark:bg-neutral-800">
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400">App</p>
-                            <p className="text-sm font-bold text-neutral-900 dark:text-neutral-50">
-                              {att.appAttended}/{att.appTotal}
-                            </p>
-                          </div>
-                          <div className="rounded-md bg-primary/5 border border-primary/20 p-2">
-                            <p className="text-xs text-neutral-500 dark:text-neutral-400">Total</p>
-                            <p className="text-sm font-bold text-neutral-900 dark:text-neutral-50">
-                              {att.totalAttended}/{att.totalClasses}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
+            ) : approvedStudents.length === 0 ? (
+              <div className="py-12 text-center">
+                <Users className="mx-auto h-10 w-10 text-neutral-300 dark:text-neutral-600 mb-3" />
+                <p className="text-sm font-medium text-neutral-600 dark:text-neutral-400">No approved students yet</p>
+                <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-500">Approve students from the Users section above.</p>
               </div>
+            ) : (
+              <>
+                {/* Search & Sort */}
+                <div className="flex flex-col gap-2 mb-4 sm:flex-row sm:items-center sm:justify-between">
+                  <SearchInput
+                    value={attendanceSearchQuery}
+                    onChange={setAttendanceSearchQuery}
+                    placeholder="Search students..."
+                    className="w-full sm:w-56"
+                  />
+                  <SortSelect
+                    options={[
+                      { value: "percentage", label: "Attendance %" },
+                      { value: "name", label: "Name" },
+                    ]}
+                    value={attendanceSort}
+                    onChange={(v) => setAttendanceSort(v as "name" | "percentage")}
+                    className="w-full sm:w-auto"
+                  />
+                </div>
+
+                {/* Table */}
+                <div className="overflow-x-auto -mx-6 px-6">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="sticky top-0 z-10 border-b border-neutral-200 bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-900">
+                        <th className="py-3 pr-3 text-left font-medium text-neutral-600 dark:text-neutral-400">Student</th>
+                        <th className="px-3 py-3 text-center font-medium text-neutral-600 dark:text-neutral-400 hidden sm:table-cell">Section</th>
+                        <th className="px-3 py-3 text-center font-medium text-neutral-600 dark:text-neutral-400">Initial</th>
+                        <th className="px-3 py-3 text-center font-medium text-neutral-600 dark:text-neutral-400">App</th>
+                        <th className="px-3 py-3 text-center font-medium text-neutral-600 dark:text-neutral-400">Total</th>
+                        <th className="pl-3 py-3 text-right font-medium text-neutral-600 dark:text-neutral-400">%</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-neutral-100 dark:divide-neutral-800">
+                      {(() => {
+                        const filtered = approvedStudents
+                          .filter(s => {
+                            if (!attendanceSearchQuery) return true;
+                            const q = attendanceSearchQuery.toLowerCase();
+                            return s.name?.toLowerCase().includes(q) || s.regNo?.toLowerCase().includes(q) || s.email.toLowerCase().includes(q);
+                          })
+                          .sort((a, b) => {
+                            if (attendanceSort === "name") return (a.name || "").localeCompare(b.name || "");
+                            const attA = computeAttendance(a.initialAttendance, appAttendanceMap[a.uid] || { appAttended: 0, appTotal: 0 });
+                            const attB = computeAttendance(b.initialAttendance, appAttendanceMap[b.uid] || { appAttended: 0, appTotal: 0 });
+                            return attB.percentage - attA.percentage;
+                          });
+
+                        if (filtered.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={6} className="py-8 text-center text-sm text-neutral-500">
+                                No matching students found
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return filtered.map((student, idx) => {
+                          const app = appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 };
+                          const att = computeAttendance(student.initialAttendance, app);
+                          const studentSection = student.sectionId ? sections.find(sec => sec.id === student.sectionId) : null;
+
+                          return (
+                            <tr
+                              key={student.uid}
+                              className={idx % 2 === 0 ? "bg-white dark:bg-neutral-950" : "bg-neutral-50/50 dark:bg-neutral-900/50"}
+                            >
+                              <td className="py-3 pr-3">
+                                <p className="font-medium text-neutral-900 dark:text-neutral-50 truncate max-w-[160px]">
+                                  {student.name || "No Name"}
+                                </p>
+                                <p className="text-xs text-neutral-500 font-mono truncate max-w-[160px]">
+                                  {student.regNo || student.email}
+                                </p>
+                              </td>
+                              <td className="px-3 py-3 text-center text-xs text-neutral-600 dark:text-neutral-400 hidden sm:table-cell">
+                                {studentSection?.name || "—"}
+                              </td>
+                              <td className="px-3 py-3 text-center text-xs tabular-nums">
+                                {att.initialAttended}/{att.initialTotal}
+                              </td>
+                              <td className="px-3 py-3 text-center text-xs tabular-nums">
+                                {att.appAttended}/{att.appTotal}
+                              </td>
+                              <td className="px-3 py-3 text-center text-xs font-medium tabular-nums">
+                                {att.totalAttended}/{att.totalClasses}
+                              </td>
+                              <td className="pl-3 py-3 text-right">
+                                <span className={cn(
+                                  "inline-block min-w-[48px] rounded-full px-2 py-0.5 text-xs font-bold tabular-nums text-center",
+                                  att.totalClasses === 0
+                                    ? "bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400"
+                                    : att.percentage >= 75
+                                    ? "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"
+                                    : att.percentage >= 50
+                                    ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-400"
+                                    : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"
+                                )}>
+                                  {att.totalClasses > 0 ? `${att.percentage}%` : "N/A"}
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        });
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
+        </section>
+
+        {/* ─── TIMETABLE SECTION ─── */}
+        <section id="timetable">
+          <h2 className="text-xl font-bold mb-4 sm:text-2xl">Timetable Management</h2>
 
         {/* Two-column layout on desktop, stacked on mobile */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
@@ -1627,7 +2106,12 @@ export default function AdminPage() {
             </div>
           </CardContent>
         </Card>
+        </section>
 
+        {/* ─── DANGER ZONE SECTION ─── */}
+        <section id="settings">
+          <h2 className="text-xl font-bold mb-4 sm:text-2xl">Settings & Danger Zone</h2>
+        
         {/* Semester Reset - Danger Zone */}
         <Card elevation={4} className="border-red-200 dark:border-red-800">
           <CardHeader>
@@ -1702,6 +2186,7 @@ export default function AdminPage() {
             )}
           </CardContent>
         </Card>
+        </section>
 
         {/* ─── DELETE USER CONFIRMATION MODAL ─── */}
         {deleteUserUid && (() => {
@@ -1766,8 +2251,12 @@ export default function AdminPage() {
             </div>
           );
         })()}
+
+              </div>
+            </main>
+          </div>
+        </div>
       </div>
-    </div>
     </PageTransition>
   );
 }

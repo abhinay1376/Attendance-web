@@ -3,25 +3,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { doc, onSnapshot, getDoc } from "firebase/firestore";
+import { doc, getDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
-import { ADMIN_EMAIL } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageTransition } from "@/components/page-transition";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { AlertCircle } from "lucide-react";
-
-interface UserData {
-  email: string;
-  name?: string;
-  regNo?: string;
-  branch?: string;
-  sectionId?: string;
-  phone?: string;
-  approved?: boolean;
-}
 
 interface Section {
   id: string;
@@ -30,58 +19,51 @@ interface Section {
 
 export default function PendingApprovalPage() {
   const router = useRouter();
-  const { user, loading } = useAuth();
-  const [userData, setUserData] = useState<UserData | null>(null);
+  const { user, profile, role, loading, profileLoading } = useAuth();
   const [sectionName, setSectionName] = useState<string>("");
 
   useEffect(() => {
-    if (!loading) {
-      if (!user) {
-        router.push("/login");
-      } else if (user.email === ADMIN_EMAIL) {
-        router.push("/admin");
-      }
+    if (loading || profileLoading) return;
+
+    if (!user) {
+      router.replace("/login");
+      return;
     }
-  }, [user, loading, router]);
 
-  // Load user data and listen for approval changes (auto-redirect)
+    if (role === "admin") {
+      router.replace("/admin");
+      return;
+    }
+
+    if (role === "student") {
+      router.replace("/student");
+      return;
+    }
+  }, [user, role, loading, profileLoading, router]);
+
+  // Load section name
   useEffect(() => {
-    if (!user || user.email === ADMIN_EMAIL) return;
+    if (!profile?.sectionId) return;
 
-    const unsubscribe = onSnapshot(doc(db, "users", user.uid), async (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data() as UserData;
-        setUserData(data);
-
-        // Auto-redirect when approved
-        if (data.approved === true) {
-          router.push("/student");
-          return;
-        }
-
-        // Load section name if sectionId exists
-        if (data.sectionId) {
-          const sectionDoc = await getDoc(doc(db, "sections", data.sectionId));
-          if (sectionDoc.exists()) {
-            setSectionName(sectionDoc.data().name);
-          }
-        }
+    const loadSection = async () => {
+      const sectionDoc = await getDoc(doc(db, "sections", profile.sectionId!));
+      if (sectionDoc.exists()) {
+        setSectionName(sectionDoc.data().name);
       }
-    });
-
-    return () => unsubscribe();
-  }, [user, router]);
+    };
+    loadSection();
+  }, [profile?.sectionId]);
 
   const handleSignOut = async () => {
     try {
       await signOut(auth);
-      router.push("/login");
-    } catch (error) {
-      console.error("Error signing out:", error);
+      router.replace("/login");
+    } catch {
+      // Silently handle sign out errors
     }
   };
 
-  if (loading) {
+  if (loading || profileLoading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
         <LoadingSpinner size="lg" />
@@ -89,7 +71,7 @@ export default function PendingApprovalPage() {
     );
   }
 
-  if (!user || user.email === ADMIN_EMAIL) {
+  if (!user || role === "admin" || role === "student") {
     return null;
   }
 
@@ -109,33 +91,33 @@ export default function PendingApprovalPage() {
           <CardContent className="space-y-6">
             <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
               <div className="space-y-3">
-                {userData?.name && (
+                {profile?.name && (
                   <div>
                     <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
                       Full Name
                     </p>
                     <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                      {userData.name}
+                      {profile.name}
                     </p>
                   </div>
                 )}
-                {userData?.regNo && (
+                {profile?.regNo && (
                   <div>
                     <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
                       Registration Number
                     </p>
                     <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50 font-mono">
-                      {userData.regNo}
+                      {profile.regNo}
                     </p>
                   </div>
                 )}
-                {userData?.branch && (
+                {profile?.branch && (
                   <div>
                     <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
                       Branch
                     </p>
                     <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                      {userData.branch}
+                      {profile.branch}
                     </p>
                   </div>
                 )}
@@ -149,13 +131,13 @@ export default function PendingApprovalPage() {
                     </p>
                   </div>
                 )}
-                {userData?.phone && (
+                {profile?.phone && (
                   <div>
                     <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
                       Phone Number
                     </p>
                     <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                      {userData.phone}
+                      {profile.phone}
                     </p>
                   </div>
                 )}

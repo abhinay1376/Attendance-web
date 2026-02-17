@@ -77,5 +77,32 @@ service cloud.firestore {
       // Only admin can read/write audit logs
       allow read, write: if isAdmin();
     }
+
+    // Notifications collection (admin only)
+    match /notifications/{notificationId} {
+      // Only admin can read notifications
+      allow read: if isAdmin();
+      // Anyone authenticated can create notifications (for registration)
+      allow create: if request.auth != null;
+      // Only admin can update/delete notifications
+      allow update, delete: if isAdmin();
+    }
+
+    // OTP Codes collection (for email verification)
+    match /otpCodes/{email} {
+      // No read access - OTP codes should only be validated server-side
+      allow read: if false;
+      // Allow creation/update from server-side only (API routes)
+      // In practice, these will be written by API routes using Admin SDK
+      allow write: if false;
+    }
+
+    // OTP Rate Limits collection (for preventing abuse)
+    match /otpRateLimits/{email} {
+      // No read access - rate limits checked server-side
+      allow read: if false;
+      // Allow creation/update from server-side only (API routes)
+      allow write: if false;
+    }
   }
 }

@@ -3,28 +3,38 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
 
 export default function Home() {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, role, loading, profileLoading } = useAuth();
 
   useEffect(() => {
-    if (!loading) {
-      if (user) {
-        router.push("/dashboard");
-      } else {
-        router.push("/login");
-      }
+    if (loading || profileLoading) return;
+
+    if (!user) {
+      router.replace("/login");
+      return;
     }
-  }, [user, loading, router]);
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <p className="animate-pulse text-foreground">Loading...</p>
-      </div>
-    );
-  }
+    switch (role) {
+      case "admin":
+        router.replace("/admin");
+        break;
+      case "student":
+        router.replace("/student");
+        break;
+      case "rejected":
+      case "pending":
+      default:
+        router.replace("/pending-approval");
+        break;
+    }
+  }, [user, role, loading, profileLoading, router]);
 
-  return null;
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <LoadingSpinner size="lg" />
+    </div>
+  );
 }
