@@ -258,30 +258,27 @@ export default function StudentPage() {
       return;
     }
 
-    setSubmitting({ ...submitting, [slotKey]: true });
+    // Optimistic update — show result immediately
+    const record: AttendanceRecord = {
+      subjectId: slot.subject,
+      status,
+      timestamp: Date.now(),
+      classCount: slot.classCount || 1,
+    };
+    const prevAttendance = attendance;
+    setAttendance((prev) => ({ ...prev, [slotKey]: record }));
+    setSubmitting((prev) => ({ ...prev, [slotKey]: true }));
 
     try {
       const attendanceDoc = doc(db, "attendance", user.uid, "dates", selectedDateStr);
-      const record: AttendanceRecord = {
-        subjectId: slot.subject,
-        status,
-        timestamp: Date.now(),
-        classCount: slot.classCount || 1,
-      };
-
-      await setDoc(attendanceDoc, {
-        [slotKey]: record,
-      }, { merge: true });
-
-      setAttendance({
-        ...attendance,
-        [slotKey]: record,
-      });
+      await setDoc(attendanceDoc, { [slotKey]: record }, { merge: true });
     } catch (error) {
       console.error("Error marking attendance:", error);
+      // Revert optimistic update on failure
+      setAttendance(prevAttendance);
       alert("Network error. Please try again.");
     } finally {
-      setSubmitting({ ...submitting, [slotKey]: false });
+      setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
     }
   };
 
@@ -374,11 +371,16 @@ export default function StudentPage() {
                 </Badge>
               )}
             </div>
-            <div className="flex items-center gap-3">
-              <span className="hidden text-sm text-neutral-600 dark:text-neutral-400 md:block">
-                {userName || user.email}
-              </span>
-              <Button variant="outline" size="sm" onClick={handleSignOut}>
+            <div className="flex items-center gap-2 sm:gap-3">
+              <div className="flex flex-col items-end leading-tight">
+                <span className="text-sm font-medium text-neutral-800 dark:text-neutral-100 max-w-[140px] truncate">
+                  {userName || user.email?.split("@")[0]}
+                </span>
+                <span className="text-[10px] text-neutral-500 dark:text-neutral-400 hidden sm:block max-w-[160px] truncate">
+                  {user.email}
+                </span>
+              </div>
+              <Button variant="outline" size="sm" onClick={handleSignOut} className="shrink-0">
                 <LogOut className="h-4 w-4 sm:mr-2" />
                 <span className="hidden sm:inline">Sign Out</span>
               </Button>
@@ -395,12 +397,12 @@ export default function StudentPage() {
                   const Icon = item.icon;
                   const isActive = currentSection === item.id;
                   return (
-                    <a
+                    <button
                       key={item.id}
-                      href={`#${item.id}`}
+                      type="button"
                       onClick={() => setCurrentSection(item.id)}
                       className={cn(
-                        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        "w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left",
                         isActive
                           ? "bg-primary/10 text-primary"
                           : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
@@ -408,7 +410,7 @@ export default function StudentPage() {
                     >
                       <Icon className="h-4 w-4" />
                       {item.label}
-                    </a>
+                    </button>
                   );
                 })}
               </nav>
@@ -437,15 +439,15 @@ export default function StudentPage() {
                         const Icon = item.icon;
                         const isActive = currentSection === item.id;
                         return (
-                          <a
+                          <button
                             key={item.id}
-                            href={`#${item.id}`}
+                            type="button"
                             onClick={() => {
                               setCurrentSection(item.id);
                               setMobileMenuOpen(false);
                             }}
                             className={cn(
-                              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                              "w-full flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-left",
                               isActive
                                 ? "bg-primary/10 text-primary"
                                 : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
@@ -453,7 +455,7 @@ export default function StudentPage() {
                           >
                             <Icon className="h-4 w-4" />
                             {item.label}
-                          </a>
+                          </button>
                         );
                       })}
                     </nav>
@@ -478,61 +480,268 @@ export default function StudentPage() {
         )}
 
         {/* ─── OVERVIEW SECTION ─── */}
-        <section id="overview">
-        {/* Attendance Summary - Compact for mobile */}
-        <Card elevation={2}>
-          <CardHeader className="p-3 sm:p-6 pb-2 sm:pb-2">
-            <CardTitle className="text-base sm:text-lg">Attendance Summary</CardTitle>
-          </CardHeader>
-          <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0">
-            <div className="grid grid-cols-3 gap-2 sm:gap-3">
-              {/* Before App */}
-              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-2 sm:p-3 dark:border-neutral-800 dark:bg-neutral-900">
-                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">Before</p>
-                {initialAttendance ? (
-                  <>
-                    <p className="text-sm sm:text-lg font-bold">
-                      {initialAttendance.attended}/{initialAttendance.total}
-                    </p>
-                    <p className="text-[10px] sm:text-xs text-neutral-500">
-                      {initialPercentage.toFixed(0)}%
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-xs sm:text-sm text-neutral-400">N/A</p>
-                )}
-              </div>
-
-              {/* Using App */}
-              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-2 sm:p-3 dark:border-neutral-800 dark:bg-neutral-900">
-                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">App</p>
-                <p className="text-sm sm:text-lg font-bold">{appAttended}/{appTotal}</p>
-                <p className="text-[10px] sm:text-xs text-neutral-500">{appPercentage.toFixed(0)}%</p>
-              </div>
-
-              {/* Overall */}
-              <div className={cn(
-                "rounded-lg border-2 p-2 sm:p-3",
-                overallPercentage >= 75 
-                  ? "border-green-500 bg-green-50 dark:bg-green-950/30" 
-                  : "border-red-500 bg-red-50 dark:bg-red-950/30"
-              )}>
-                <p className="text-[10px] sm:text-xs text-neutral-500 mb-0.5 sm:mb-1">Total</p>
-                <p className="text-sm sm:text-lg font-bold">{totalAttended}/{totalClasses}</p>
+        {currentSection === "overview" && (
+        <motion.section
+          id="overview"
+          key="overview"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+        >
+          {/* Arc gauge + breakdown */}
+          <Card elevation={2} className="overflow-hidden">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base sm:text-lg">Attendance Summary</CardTitle>
+            </CardHeader>
+            <CardContent className="pb-5">
+              {/* Circular gauge — full circle, label truly centered */}
+              <div className="flex flex-col items-center mb-4">
+                {(() => {
+                  const pct = Math.min(overallPercentage, 100);
+                  const color = pct >= 75 ? "#22c55e" : pct >= 50 ? "#f59e0b" : "#ef4444";
+                  const size = 180;
+                  const cx = size / 2;
+                  const cy = size / 2;
+                  const r = 72;
+                  const circ = 2 * Math.PI * r;
+                  // 270° arc starting from bottom-left (225° = 225deg from 3 o'clock = rotate 225-90=135)
+                  const arcLength = circ * 0.75;
+                  const filled = arcLength * (pct / 100);
+                  return (
+                    <div className="relative" style={{ width: size, height: size }}>
+                      <svg width={size} height={size}>
+                        {/* Track arc */}
+                        <circle
+                          cx={cx} cy={cy} r={r}
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="12"
+                          className="text-neutral-200 dark:text-neutral-800"
+                          strokeDasharray={`${arcLength} ${circ}`}
+                          strokeLinecap="round"
+                          transform={`rotate(135 ${cx} ${cy})`}
+                        />
+                        {/* Filled arc */}
+                        <motion.circle
+                          cx={cx} cy={cy} r={r}
+                          fill="none"
+                          stroke={color}
+                          strokeWidth="12"
+                          strokeLinecap="round"
+                          strokeDasharray={`${arcLength} ${circ}`}
+                          initial={{ strokeDashoffset: arcLength }}
+                          animate={{ strokeDashoffset: arcLength - filled }}
+                          transition={{ duration: 1, ease: "easeOut" }}
+                          transform={`rotate(135 ${cx} ${cy})`}
+                        />
+                      </svg>
+                      {/* Centered label — absolutely positioned to the exact center of the SVG */}
+                      <div
+                        className="absolute inset-0 flex flex-col items-center justify-center"
+                        style={{ pointerEvents: "none" }}
+                      >
+                        <span className="text-4xl font-extrabold leading-none" style={{ color }}>
+                          {overallPercentage.toFixed(1)}
+                          <span className="text-xl font-bold">%</span>
+                        </span>
+                        <span className="text-[11px] text-neutral-500 mt-1">{totalAttended}/{totalClasses}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <p className={cn(
-                  "text-[10px] sm:text-xs font-semibold",
-                  overallPercentage >= 75 ? "text-green-600" : "text-red-600"
+                  "text-sm font-semibold -mt-1",
+                  overallPercentage >= 75 ? "text-green-600" : overallPercentage >= 50 ? "text-amber-600" : "text-red-600"
                 )}>
-                  {overallPercentage.toFixed(0)}%
+                  {overallPercentage >= 75 ? "On Track" : overallPercentage >= 50 ? "Needs Improvement" : "Critical – Below 50%"}
                 </p>
               </div>
-            </div>
-          </CardContent>
-        </Card>
-        </section>
 
-        {/* ─── MARK ATTENDANCE SECTION ─── */}
-        <section id="attendance">
+              {/* Breakdown mini-stats */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900 p-2.5">
+                  <p className="text-[10px] text-neutral-500 mb-1">Before App</p>
+                  {initialAttendance ? (
+                    <>
+                      <p className="text-sm font-bold">{initialAttendance.attended}/{initialAttendance.total}</p>
+                      <p className="text-[10px] text-neutral-500">{initialPercentage.toFixed(1)}%</p>
+                    </>
+                  ) : (
+                    <p className="text-xs text-neutral-400">N/A</p>
+                  )}
+                </div>
+                <div className="rounded-lg border border-neutral-200 bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-900 p-2.5">
+                  <p className="text-[10px] text-neutral-500 mb-1">Via App</p>
+                  <p className="text-sm font-bold">{appAttended}/{appTotal}</p>
+                  <p className="text-[10px] text-neutral-500">{appPercentage.toFixed(1)}%</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* ─── MARK ATTENDANCE (inline on overview) ─── */}
+          <div className="mt-6">
+            <h2 className="text-base sm:text-lg font-semibold mb-3">Mark Attendance</h2>
+
+            {/* Date picker row */}
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Date:</span>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="outline" size="sm" className="h-8 px-3 text-sm font-normal">
+                      <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+                      {format(selectedDate, "EEE, MMM d")}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start" sideOffset={4}>
+                    <Calendar
+                      mode="single"
+                      selected={selectedDate}
+                      onSelect={(date) => { if (date && !isDateDisabled(date)) setSelectedDate(date); }}
+                      disabled={isDateDisabled}
+                      initialFocus
+                      className="rounded-md border-0"
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
+              {isToday ? (
+                <Badge variant="success">Today</Badge>
+              ) : isFutureDate && allowFutureAttendance ? (
+                <Badge variant="warning"><AlertTriangle className="h-3 w-3 mr-1" />Future</Badge>
+              ) : isPastDate ? (
+                <Badge variant="info">{format(selectedDate, "MMM d")}</Badge>
+              ) : null}
+            </div>
+
+            {/* Invalid date error */}
+            {!isSelectedDateValid && (
+              <Alert variant="destructive" className="mb-4">
+                <Info className="h-4 w-4" />
+                <AlertDescription className="ml-7 text-sm">
+                  {isFutureDate && !allowFutureAttendance
+                    ? "Cannot mark future dates. Contact admin for permission."
+                    : isFutureDate && allowFutureAttendance
+                    ? "Future attendance limited to 7 days ahead."
+                    : isHoliday
+                    ? `Holiday: ${holidayReasons.get(selectedDateStr) || "Holiday"}`
+                    : isSunday
+                    ? "Sundays are not valid."
+                    : cutoffDate && selectedDateStr <= format(cutoffDate, "yyyy-MM-dd")
+                    ? `Before cutoff (${format(cutoffDate, "MMM d")})`
+                    : "Invalid date."}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Period title */}
+            <p className="text-sm font-medium text-neutral-600 dark:text-neutral-400 mb-3">
+              {isToday ? `Today's Classes (${selectedDayName})` : `${format(selectedDate, "MMM d")} (${selectedDayName})`}
+            </p>
+
+            {/* Period cards */}
+            {!isSelectedDateValid ? (
+              <Card>
+                <CardContent className="py-10 text-center">
+                  <Info className="mx-auto h-10 w-10 text-neutral-400 dark:text-neutral-600 mb-3" />
+                  <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">Cannot Mark Attendance</p>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400">Please select a valid date from the calendar above.</p>
+                </CardContent>
+              </Card>
+            ) : slotsForDate.length === 0 ? (
+              <Card>
+                <CardContent className="py-10 text-center">
+                  <Info className="mx-auto h-10 w-10 text-neutral-400 dark:text-neutral-600 mb-3" />
+                  <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 mb-1">No Classes Scheduled</p>
+                  <p className="text-xs text-neutral-500 dark:text-neutral-400">Your timetable shows no classes for {selectedDayName}.</p>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {slotsForDate.map((slot, index) => {
+                  const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
+                  const isSubmitted = !!attendance[slotKey];
+                  const record = attendance[slotKey];
+                  return (
+                    <motion.div
+                      key={slotKey}
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2, delay: index * 0.04 }}
+                      whileHover={{ y: -3, transition: { duration: 0.15 } }}
+                    >
+                      <Card elevation={3} className="transition-shadow hover:shadow-lg" style={{ boxShadow: "0 2px 12px rgba(0,0,0,0.07)" }}>
+                        <CardHeader className="p-3 sm:p-4 pb-2">
+                          <CardTitle className="text-sm sm:text-base flex flex-wrap items-center gap-1">
+                            <span>{slot.start} – {slot.end}</span>
+                            <span className="text-xs font-normal text-blue-600 dark:text-blue-400">({slot.classCount} class{slot.classCount > 1 ? "es" : ""})</span>
+                          </CardTitle>
+                          {isSubmitted && (
+                            <CardDescription>
+                              Marked as{" "}
+                              <span className={record.status === "PRESENT" ? "font-semibold text-emerald-600 dark:text-emerald-400" : "font-semibold text-rose-600 dark:text-rose-400"}>
+                                {record.status}
+                              </span>
+                            </CardDescription>
+                          )}
+                        </CardHeader>
+                        <CardContent className="p-3 sm:p-4 pt-0 space-y-2">
+                          <p className="text-xs sm:text-sm font-medium text-neutral-900 dark:text-neutral-50">{slot.subject}</p>
+                          {isSubmitted && (
+                            <p className="text-[10px] text-neutral-400 dark:text-neutral-500">
+                              Saved at {new Date(record.timestamp).toLocaleTimeString()}
+                            </p>
+                          )}
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
+                              disabled={submitting[slotKey]}
+                              className={cn(
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                record?.status === "PRESENT"
+                                  ? "bg-emerald-500 border-emerald-500 text-white cursor-default"
+                                  : "bg-white dark:bg-neutral-900 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40",
+                                submitting[slotKey] && "opacity-60 cursor-not-allowed"
+                              )}
+                            >
+                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present" : "Present"}
+                            </button>
+                            <button
+                              onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
+                              disabled={submitting[slotKey]}
+                              className={cn(
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                record?.status === "ABSENT"
+                                  ? "bg-rose-500 border-rose-500 text-white cursor-default"
+                                  : "bg-white dark:bg-neutral-900 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40",
+                                submitting[slotKey] && "opacity-60 cursor-not-allowed"
+                              )}
+                            >
+                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent" : "Absent"}
+                            </button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+        </motion.section>
+        )}
+
+        {/* ─── MARK ATTENDANCE SECTION (dedicated tab, mirrors overview) ─── */}
+        {currentSection === "attendance" && (
+        <motion.section
+          id="attendance"
+          key="attendance"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+        >
         {/* Compact Date Selection */}
         <div className="flex flex-col sm:flex-row sm:items-center gap-3 mb-4">
           <div className="flex items-center gap-2">
@@ -644,8 +853,16 @@ export default function StudentPage() {
                   : 'animate-fade-in-delay-5';
 
                 return (
-                  <div key={slotKey} className={fadeClass}>
-                    <Card elevation={3}>
+                  <motion.div
+                    key={slotKey}
+                    className={fadeClass}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.2, delay: index * 0.04 }}
+                    whileHover={{ y: -3, transition: { duration: 0.15 } }}
+                    style={{ perspective: "800px" }}
+                  >
+                    <Card elevation={3} className="transition-shadow hover:shadow-lg" style={{ transform: "rotateX(0.5deg)", boxShadow: "0 2px 12px rgba(0,0,0,0.07)" }}>
                       <CardHeader className="p-3 sm:p-6 pb-2 sm:pb-3">
                         <CardTitle className="text-sm sm:text-lg flex flex-wrap items-center gap-1">
                           <span>{slot.start} – {slot.end}</span>
@@ -653,133 +870,91 @@ export default function StudentPage() {
                             ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
                           </span>
                         </CardTitle>
-                        <AnimatePresence mode="wait">
                           {isSubmitted && (
-                            <motion.div
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              exit={{ opacity: 0 }}
-                              transition={{ duration: 0.2 }}
-                            >
-                              <CardDescription>
-                                Marked as{" "}
-                                <span
-                                  className={
-                                    record.status === "PRESENT"
-                                      ? "font-semibold text-green-600 dark:text-green-400"
-                                      : "font-semibold text-red-600 dark:text-red-400"
-                                  }
-                                >
-                                  {record.status}
-                                </span>
-                              </CardDescription>
-                            </motion.div>
+                            <CardDescription>
+                              Marked as{" "}
+                              <span
+                                className={
+                                  record.status === "PRESENT"
+                                    ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                                    : "font-semibold text-rose-600 dark:text-rose-400"
+                                }
+                              >
+                                {record.status}
+                              </span>
+                            </CardDescription>
                           )}
-                        </AnimatePresence>
                       </CardHeader>
-                      <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0 space-y-3 sm:space-y-4">
-                        <AnimatePresence mode="wait">
-                          {isSubmitted ? (
-                            <motion.div
-                              key="submitted"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              exit={{ opacity: 0 }}
-                              transition={{ duration: 0.2 }}
-                              className="space-y-2 sm:space-y-3"
-                            >
-                              <p className="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
-                                Subject:{" "}
-                                <span className="font-medium text-neutral-900 dark:text-neutral-50">
-                                  {slot.subject}
-                                </span>
-                              </p>
-                              <p className="text-[10px] sm:text-xs text-neutral-500 dark:text-neutral-400">
-                                Submitted at {new Date(record.timestamp).toLocaleTimeString()}
-                              </p>
-                              <div className="flex gap-2 pt-1">
-                                <Button
-                                  size="sm"
-                                  variant={record.status === "PRESENT" ? "outline" : "default"}
-                                  className={cn(
-                                    "h-8 text-xs sm:h-9 sm:text-sm",
-                                    record.status !== "PRESENT" ? "bg-green-600 hover:bg-green-700 text-white dark:bg-green-700 dark:hover:bg-green-800" : ""
-                                  )}
-                                  onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
-                                  disabled={submitting[slotKey] || record.status === "PRESENT"}
-                                >
-                                  {submitting[slotKey] ? <LoadingSpinner size="sm" /> : "Present"}
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant={record.status === "ABSENT" ? "outline" : "default"}
-                                  className={cn(
-                                    "h-8 text-xs sm:h-9 sm:text-sm",
-                                    record.status !== "ABSENT" ? "bg-red-600 hover:bg-red-700 text-white dark:bg-red-700 dark:hover:bg-red-800" : ""
-                                  )}
-                                  onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
-                                  disabled={submitting[slotKey] || record.status === "ABSENT"}
-                                >
-                                  {submitting[slotKey] ? <LoadingSpinner size="sm" /> : "Absent"}
-                                </Button>
-                              </div>
-                            </motion.div>
-                          ) : (
-                            <motion.div
-                              key="form"
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: 1 }}
-                              exit={{ opacity: 0 }}
-                              transition={{ duration: 0.2 }}
-                              className="space-y-3 sm:space-y-4"
-                            >
-                              <div className="space-y-1 sm:space-y-2">
-                                <p className="text-xs sm:text-sm font-medium text-neutral-700 dark:text-neutral-200">
-                                  Subject
-                                </p>
-                                <p className="text-xs sm:text-sm text-neutral-900 dark:text-neutral-50 font-medium">
-                                  {slot.subject}
-                                </p>
-                              </div>
-
-                              <div className="flex gap-2">
-                                <Button
-                                  className="flex-1 bg-green-600 hover:bg-green-700 text-white min-h-[40px] sm:min-h-[44px] text-xs sm:text-sm dark:bg-green-700 dark:hover:bg-green-800"
-                                  onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
-                                  disabled={submitting[slotKey]}
-                                  aria-label={`Mark present for ${slot.start}–${slot.end}`}
-                                >
-                                  {submitting[slotKey] ? (
-                                    <LoadingSpinner size="sm" />
-                                  ) : (
-                                    "Present"
-                                  )}
-                                </Button>
-                                <Button
-                                  className="flex-1 bg-red-600 hover:bg-red-700 text-white min-h-[40px] sm:min-h-[44px] text-xs sm:text-sm dark:bg-red-700 dark:hover:bg-red-800"
-                                  onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
-                                  disabled={submitting[slotKey]}
-                                  aria-label={`Mark absent for ${slot.start}–${slot.end}`}
-                                >
-                                  {submitting[slotKey] ? (
-                                    <LoadingSpinner size="sm" />
-                                  ) : (
-                                    "Absent"
-                                  )}
-                                </Button>
-                              </div>
-                            </motion.div>
+                      <CardContent className="p-3 sm:p-6 pt-0 sm:pt-0 space-y-3">
+                          <p className="text-xs sm:text-sm text-neutral-600 dark:text-neutral-400">
+                            <span className="font-medium text-neutral-900 dark:text-neutral-50">{slot.subject}</span>
+                          </p>
+                          {isSubmitted && (
+                            <p className="text-[10px] sm:text-xs text-neutral-400 dark:text-neutral-500">
+                              Saved at {new Date(record.timestamp).toLocaleTimeString()}
+                            </p>
                           )}
-                        </AnimatePresence>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
+                              disabled={submitting[slotKey]}
+                              aria-label={`Mark present for ${slot.start}–${slot.end}`}
+                              className={cn(
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                record?.status === "PRESENT"
+                                  ? "bg-emerald-500 border-emerald-500 text-white cursor-default"
+                                  : "bg-white dark:bg-neutral-900 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40",
+                                submitting[slotKey] && "opacity-60 cursor-not-allowed"
+                              )}
+                            >
+                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present" : "Present"}
+                            </button>
+                            <button
+                              onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
+                              disabled={submitting[slotKey]}
+                              aria-label={`Mark absent for ${slot.start}–${slot.end}`}
+                              className={cn(
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                record?.status === "ABSENT"
+                                  ? "bg-rose-500 border-rose-500 text-white cursor-default"
+                                  : "bg-white dark:bg-neutral-900 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40",
+                                submitting[slotKey] && "opacity-60 cursor-not-allowed"
+                              )}
+                            >
+                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent" : "Absent"}
+                            </button>
+                          </div>
                       </CardContent>
                     </Card>
-                  </div>
+                  </motion.div>
                 );
               })}
                 </div>
               )}
           </div>
-        </section>
+        </motion.section>
+        )}
+
+        {/* ─── HISTORY SECTION ─── */}
+        {currentSection === "history" && (
+        <motion.section
+          id="history"
+          key="history"
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25 }}
+        >
+          <Card elevation={2}>
+            <CardHeader>
+              <CardTitle>Attendance History</CardTitle>
+              <CardDescription>Your full attendance record</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-neutral-500">Coming soon — detailed history view.</p>
+            </CardContent>
+          </Card>
+        </motion.section>
+        )}
 
               </div>
             </main>

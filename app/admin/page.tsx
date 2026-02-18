@@ -16,7 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { PageTransition } from "@/components/page-transition";
-import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings } from "lucide-react";
+import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings, BookUser, Pencil, Check } from "lucide-react";
 import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
@@ -118,6 +118,8 @@ export default function AdminPage() {
   const [timetable, setTimetable] = useState<FullTimetable>({});
   // Real-time app attendance per student: uid -> { appAttended, appTotal }
   const [appAttendanceMap, setAppAttendanceMap] = useState<Record<string, AppAttendanceData>>({});
+  // Last date each student marked any attendance: uid -> "yyyy-MM-dd"
+  const [studentActivityMap, setStudentActivityMap] = useState<Record<string, string>>({});
   const [attendanceLoading, setAttendanceLoading] = useState(true);
   
   const [subjectName, setSubjectName] = useState("");
@@ -137,6 +139,11 @@ export default function AdminPage() {
   const [newSlotEnd, setNewSlotEnd] = useState("");
   const [isAddingSlot, setIsAddingSlot] = useState(false);
   const [isDeletingSlot, setIsDeletingSlot] = useState<string | null>(null);
+  const [editSlotKey, setEditSlotKey] = useState<string | null>(null);
+  const [editSlotSubject, setEditSlotSubject] = useState("");
+  const [editSlotStart, setEditSlotStart] = useState("");
+  const [editSlotEnd, setEditSlotEnd] = useState("");
+  const [isSavingSlot, setIsSavingSlot] = useState(false);
 
   // Helper: calculate classCount from start/end times
   const ONE_CLASS_DURATION = 50;
@@ -183,6 +190,35 @@ export default function AdminPage() {
       alert("Error adding timetable entry");
     } finally {
       setIsAddingSlot(false);
+    }
+  };
+
+  const handleSaveSlot = async (dayKey: string, slotIdx: number) => {
+    if (!editSlotSubject.trim() || !editSlotStart || !editSlotEnd) return;
+    setIsSavingSlot(true);
+    try {
+      const timetableRef = doc(db, "timetable", "CSE-DS");
+      const snap = await getDoc(timetableRef);
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const sections = data.sections || {};
+      const sectionData = sections[viewSection] || {};
+      const daySlots: TimetableSlot[] = [...(sectionData[dayKey] || [])];
+      const [sH, sM] = editSlotStart.split(":").map(Number);
+      const [eH, eM] = editSlotEnd.split(":").map(Number);
+      const diffMins = (eH * 60 + eM) - (sH * 60 + sM);
+      const classCount = Math.max(1, Math.round(diffMins / 50));
+      daySlots[slotIdx] = { subject: editSlotSubject.trim(), start: editSlotStart, end: editSlotEnd, classCount };
+      daySlots.sort((a, b) => a.start.localeCompare(b.start));
+      sectionData[dayKey] = daySlots;
+      sections[viewSection] = sectionData;
+      await setDoc(timetableRef, { ...data, sections }, { merge: true });
+      setEditSlotKey(null);
+    } catch (error) {
+      console.error("Error saving slot:", error);
+      alert("Error saving timetable entry");
+    } finally {
+      setIsSavingSlot(false);
     }
   };
 
@@ -253,6 +289,21 @@ export default function AdminPage() {
 
   // ─── NEW: Restore user state ───
   const [restoringUser, setRestoringUser] = useState<string | null>(null);
+
+  // ─── Student edit modal state ───
+  const [editStudentUid, setEditStudentUid] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editRegNo, setEditRegNo] = useState("");
+  const [editBranch, setEditBranch] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [editSectionId, setEditSectionId] = useState("");
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // Students section search
+  const [studentsSearch, setStudentsSearch] = useState("");
+
+  // Mark-all-future loading
+  const [isMarkingAllFuture, setIsMarkingAllFuture] = useState(false);
 
   useEffect(() => {
     if (loading || profileLoading) return;
@@ -459,6 +510,7 @@ export default function AdminPage() {
 
     const unsubscribers: (() => void)[] = [];
     const localMap: Record<string, AppAttendanceData> = {};
+    const localActivityMap: Record<string, string> = {};
     let loadedCount = 0;
 
     approvedStudents.forEach((student) => {
@@ -466,7 +518,10 @@ export default function AdminPage() {
       const unsub = onSnapshot(datesRef, (snapshot) => {
         let attended = 0;
         let total = 0;
+        let lastDate = "";
         snapshot.forEach((dateDoc) => {
+          // dateDoc.id is "yyyy-MM-dd"
+          if (dateDoc.id > lastDate) lastDate = dateDoc.id;
           const data = dateDoc.data();
           Object.values(data).forEach((record: any) => {
             if (record && typeof record.status === "string") {
@@ -479,9 +534,10 @@ export default function AdminPage() {
           });
         });
         localMap[student.uid] = { appAttended: attended, appTotal: total };
+        localActivityMap[student.uid] = lastDate;
         loadedCount++;
-        // Update state with a fresh copy each time
         setAppAttendanceMap({ ...localMap });
+        setStudentActivityMap({ ...localActivityMap });
         if (loadedCount >= approvedStudents.length) {
           setAttendanceLoading(false);
         }
@@ -690,6 +746,43 @@ export default function AdminPage() {
     } catch (error) {
       console.error("Error toggling future attendance:", error);
       alert("Error updating future attendance permission");
+    }
+  };
+
+  // ─── Handle edit save ───
+  const handleSaveEdit = async () => {
+    if (!editStudentUid) return;
+    setIsSavingEdit(true);
+    try {
+      await setDoc(doc(db, "users", editStudentUid), {
+        name: editName.trim(),
+        regNo: editRegNo.trim().toLowerCase(),
+        branch: editBranch.trim(),
+        phone: editPhone.trim(),
+        sectionId: editSectionId,
+      }, { merge: true });
+      setEditStudentUid(null);
+    } catch (e) {
+      alert("Error saving: " + e);
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  // ─── Mark ALL approved users for future attendance ───
+  const handleMarkAllFutureAttendance = async () => {
+    if (!confirm(`Enable future attendance for all ${allApproved.length} approved students?`)) return;
+    setIsMarkingAllFuture(true);
+    try {
+      const batch = writeBatch(db);
+      allApproved.forEach(s => {
+        batch.update(doc(db, "users", s.uid), { allowFutureAttendance: true });
+      });
+      await batch.commit();
+    } catch (e) {
+      alert("Error: " + e);
+    } finally {
+      setIsMarkingAllFuture(false);
     }
   };
 
@@ -983,9 +1076,36 @@ export default function AdminPage() {
       return 0;
     });
 
+  // ─── ACTIVITY LOGIC: last 3 working non-holiday non-Sunday days ───
+  const holidaySet = new Set(holidays.map(h => h.date));
+  const getLast3WorkingDays = (): string[] => {
+    const days: string[] = [];
+    const cursor = new Date();
+    cursor.setDate(cursor.getDate() - 1); // start from yesterday
+    while (days.length < 3) {
+      const iso = cursor.toISOString().slice(0, 10);
+      if (cursor.getDay() !== 0 && !holidaySet.has(iso)) {
+        days.push(iso);
+      }
+      cursor.setDate(cursor.getDate() - 1);
+    }
+    return days;
+  };
+  const last3WorkingDays = getLast3WorkingDays();
+  const activityCutoff = last3WorkingDays[last3WorkingDays.length - 1]; // oldest of the 3
+
+  const activeStudents = allApproved.filter(s => {
+    const lastDate = studentActivityMap[s.uid];
+    return lastDate && lastDate >= activityCutoff;
+  });
+  const inactiveStudents = allApproved.filter(s => {
+    const lastDate = studentActivityMap[s.uid];
+    return !lastDate || lastDate < activityCutoff;
+  });
+
   const menuItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "users", label: "Users", icon: Users },
+    { id: "students", label: "Students", icon: BookUser },
     { id: "attendance", label: "Attendance", icon: BarChart3 },
     { id: "timetable", label: "Timetable", icon: CalendarIcon },
     { id: "settings", label: "Settings", icon: Settings },
@@ -1040,12 +1160,12 @@ export default function AdminPage() {
                   const Icon = item.icon;
                   const isActive = currentSection === item.id;
                   return (
-                    <a
+                    <button
                       key={item.id}
-                      href={`#${item.id}`}
+                      type="button"
                       onClick={() => setCurrentSection(item.id)}
                       className={cn(
-                        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                        "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                         isActive
                           ? "bg-primary/10 text-primary"
                           : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
@@ -1053,7 +1173,7 @@ export default function AdminPage() {
                     >
                       <Icon className="h-4 w-4" />
                       {item.label}
-                    </a>
+                    </button>
                   );
                 })}
               </nav>
@@ -1082,15 +1202,15 @@ export default function AdminPage() {
                         const Icon = item.icon;
                         const isActive = currentSection === item.id;
                         return (
-                          <a
+                          <button
                             key={item.id}
-                            href={`#${item.id}`}
+                            type="button"
                             onClick={() => {
                               setCurrentSection(item.id);
                               setMobileMenuOpen(false);
                             }}
                             className={cn(
-                              "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+                              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
                               isActive
                                 ? "bg-primary/10 text-primary"
                                 : "text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50"
@@ -1098,7 +1218,7 @@ export default function AdminPage() {
                           >
                             <Icon className="h-4 w-4" />
                             {item.label}
-                          </a>
+                          </button>
                         );
                       })}
                     </nav>
@@ -1111,67 +1231,124 @@ export default function AdminPage() {
             <main className="flex-1 p-3 sm:p-4 lg:p-6">
               <div className="space-y-4 sm:space-y-6">
 
+        <AnimatePresence mode="wait">
+
         {/* ─── DASHBOARD SECTION ─── */}
-        <section id="dashboard">
+        {currentSection === "dashboard" && (
+        <motion.section
+          id="dashboard"
+          key="dashboard"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
           <h2 className="text-xl font-bold mb-4 sm:text-2xl">Dashboard Overview</h2>
           <div className="grid grid-cols-2 gap-2 sm:gap-4 lg:grid-cols-4">
-            <Card elevation={2}>
-              <CardContent className="p-3 sm:pt-6 sm:p-6">
-                <div className="flex items-center gap-2 sm:gap-3">
-                  <div className="rounded-lg bg-blue-100 p-1.5 sm:p-2 dark:bg-blue-900/30">
-                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-blue-600 dark:text-blue-400" />
-                  </div>
-                  <div>
-                    <p className="text-xl sm:text-2xl font-bold">{allPending.length}</p>
-                    <p className="text-[10px] sm:text-xs text-neutral-500">Pending</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card elevation={2}>
-              <CardContent className="p-3 sm:pt-6 sm:p-6">
-                <div className="flex items-center gap-2 sm:gap-3">
-                  <div className="rounded-lg bg-green-100 p-1.5 sm:p-2 dark:bg-green-900/30">
-                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-green-600 dark:text-green-400" />
-                  </div>
-                  <div>
-                    <p className="text-xl sm:text-2xl font-bold">{allApproved.length}</p>
-                    <p className="text-[10px] sm:text-xs text-neutral-500">Approved</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <Card elevation={2}>
-              <CardContent className="p-3 sm:pt-6 sm:p-6">
-                <div className="flex items-center gap-2 sm:gap-3">
-                  <div className="rounded-lg bg-red-100 p-1.5 sm:p-2 dark:bg-red-900/30">
-                    <Users className="h-4 w-4 sm:h-5 sm:w-5 text-red-600 dark:text-red-400" />
-                  </div>
-                  <div>
-                    <p className="text-xl sm:text-2xl font-bold">{allRejected.length}</p>
-                    <p className="text-[10px] sm:text-xs text-neutral-500">Rejected</p>
+            {[
+              { label: "Pending", count: allPending.length, color: "blue", section: "users" },
+              { label: "Approved", count: allApproved.length, color: "green", section: "users" },
+              { label: "Rejected", count: allRejected.length, color: "red", section: "users" },
+              { label: "Notifications", count: unreadCount, color: "purple", section: "" },
+            ].map((item, i) => (
+              <motion.button
+                key={item.label}
+                type="button"
+                onClick={() => item.section ? setCurrentSection(item.section) : setShowNotifications(true)}
+                className={`text-left rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 shadow-sm transition-colors hover:border-${item.color}-300 hover:bg-${item.color}-50/50 dark:hover:bg-${item.color}-950/20`}
+                initial={{ opacity: 0, y: 16, rotateX: 6 }}
+                animate={{ opacity: 1, y: 0, rotateX: 0 }}
+                transition={{ duration: 0.28, delay: i * 0.06, ease: "easeOut" }}
+                whileHover={{ y: -4, boxShadow: "0 8px 24px rgba(0,0,0,0.10)", transition: { duration: 0.15 } }}
+                whileTap={{ scale: 0.97 }}
+                style={{ perspective: "600px", transformStyle: "preserve-3d" }}
+              >
+                <div className="p-3 sm:p-5">
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <div className={`rounded-lg bg-${item.color}-100 dark:bg-${item.color}-900/30 p-1.5 sm:p-2`}>
+                      {item.label === "Notifications"
+                        ? <Bell className={`h-4 w-4 sm:h-5 sm:w-5 text-${item.color}-600 dark:text-${item.color}-400`} />
+                        : <Users className={`h-4 w-4 sm:h-5 sm:w-5 text-${item.color}-600 dark:text-${item.color}-400`} />}
+                    </div>
+                    <div>
+                      <p className="text-xl sm:text-2xl font-bold">{item.count}</p>
+                      <p className="text-[10px] sm:text-xs text-neutral-500">{item.label}</p>
+                    </div>
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-            <Card elevation={2}>
-              <CardContent className="p-3 sm:pt-6 sm:p-6">
-                <div className="flex items-center gap-2 sm:gap-3">
-                  <div className="rounded-lg bg-purple-100 p-1.5 sm:p-2 dark:bg-purple-900/30">
-                    <Bell className="h-4 w-4 sm:h-5 sm:w-5 text-purple-600 dark:text-purple-400" />
-                  </div>
-                  <div>
-                    <p className="text-xl sm:text-2xl font-bold">{unreadCount}</p>
-                    <p className="text-[10px] sm:text-xs text-neutral-500">Notifications</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+              </motion.button>
+            ))}
           </div>
-        </section>
+
+          {/* Activity cards */}
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 mt-2 sm:mt-4">
+            {[
+              { label: "Active Students", count: activeStudents.length, color: "emerald", icon: "active" },
+              { label: "Not Active", count: inactiveStudents.length, color: "rose", icon: "inactive" },
+            ].map((item, i) => (
+              <motion.button
+                key={item.label}
+                type="button"
+                onClick={() => setCurrentSection("users")}
+                className={`text-left rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 shadow-sm transition-colors hover:border-${item.color}-300 hover:bg-${item.color}-50/50 dark:hover:bg-${item.color}-950/20`}
+                initial={{ opacity: 0, y: 16, rotateX: 6 }}
+                animate={{ opacity: 1, y: 0, rotateX: 0 }}
+                transition={{ duration: 0.28, delay: 0.24 + i * 0.06, ease: "easeOut" }}
+                whileHover={{ y: -4, boxShadow: "0 8px 24px rgba(0,0,0,0.10)", transition: { duration: 0.15 } }}
+                whileTap={{ scale: 0.97 }}
+                style={{ perspective: "600px", transformStyle: "preserve-3d" }}
+              >
+                <div className="p-3 sm:p-5">
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <div className={`rounded-lg bg-${item.color}-100 dark:bg-${item.color}-900/30 p-1.5 sm:p-2`}>
+                      <Users className={`h-4 w-4 sm:h-5 sm:w-5 text-${item.color}-600 dark:text-${item.color}-400`} />
+                    </div>
+                    <div>
+                      <p className="text-xl sm:text-2xl font-bold">{item.count}</p>
+                      <p className="text-[10px] sm:text-xs text-neutral-500">{item.label}</p>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-neutral-400 mt-1.5 pl-0.5">Last 3 working days</p>
+                </div>
+              </motion.button>
+            ))}
+          </div>
+
+          {/* Quick links */}
+          <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {menuItems.filter(m => m.id !== "dashboard").map((item, i) => {
+              const Icon = item.icon;
+              return (
+                <motion.button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setCurrentSection(item.id)}
+                  className="flex items-center gap-2 rounded-lg border border-neutral-200 bg-white px-4 py-3 text-sm font-medium text-neutral-700 hover:bg-neutral-50 dark:border-neutral-800 dark:bg-neutral-950 dark:text-neutral-300 dark:hover:bg-neutral-900 transition-colors"
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.22, delay: 0.24 + i * 0.05 }}
+                  whileHover={{ y: -2, boxShadow: "0 4px 14px rgba(0,0,0,0.08)", transition: { duration: 0.12 } }}
+                  whileTap={{ scale: 0.97 }}
+                >
+                  <Icon className="h-4 w-4" />
+                  {item.label}
+                </motion.button>
+              );
+            })}
+          </div>
+        </motion.section>
+        )}
 
         {/* ─── USERS SECTION ─── */}
-        <section id="users">
+        {currentSection === "users" && (
+        <motion.section
+          id="users"
+          key="users"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
           <h2 className="text-xl font-bold mb-4 sm:text-2xl">User Management</h2>
 
           {/* Pending Users */}
@@ -1251,6 +1428,18 @@ export default function AdminPage() {
           </Collapsible>
 
           {/* Approved Users */}
+          <div className="flex items-center justify-between mb-1 mt-1 px-1">
+            <span className="text-xs text-neutral-500 font-medium">Approved ({allApproved.length})</span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs border-blue-300 text-blue-700 hover:bg-blue-50 dark:border-blue-700 dark:text-blue-400 dark:hover:bg-blue-950/40"
+              onClick={handleMarkAllFutureAttendance}
+              disabled={isMarkingAllFuture || allApproved.length === 0}
+            >
+              {isMarkingAllFuture ? "Updating..." : "✦ Mark all for Future Attendance"}
+            </Button>
+          </div>
           <Collapsible
             title="Approved Students"
             count={allApproved.length}
@@ -1434,10 +1623,106 @@ export default function AdminPage() {
               </div>
             )}
           </Collapsible>
-        </section>
 
-        {/* Initial Attendance Section */}
-        <Card elevation={3} id="initial-attendance">
+          {/* ─── ACTIVITY COLLAPSIBLES ─── */}
+          <div className="mt-4 mb-1 px-1">
+            <p className="text-xs text-neutral-500 font-medium">
+              Activity based on last 3 working days ({last3WorkingDays.slice(-1)[0]} → {last3WorkingDays[0]})
+            </p>
+          </div>
+
+          {/* Active Users */}
+          <Collapsible
+            title="Active Students"
+            count={activeStudents.length}
+            defaultOpen={false}
+            badge={<Badge variant="success">{activeStudents.length} active</Badge>}
+            className="mb-3"
+          >
+            {activeStudents.length === 0 ? (
+              <p className="text-center text-sm text-neutral-500 py-4">No active students in the last 3 working days.</p>
+            ) : (
+              <div className="space-y-2">
+                {activeStudents.map((student, idx) => {
+                  const lastDate = studentActivityMap[student.uid];
+                  const att = computeAttendance(student.initialAttendance, appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 });
+                  return (
+                    <motion.div
+                      key={student.uid}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.18, delay: idx * 0.03 }}
+                      className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/20 p-2.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                        <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
+                        <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5">
+                          Last active: {lastDate}
+                        </p>
+                      </div>
+                      <span className={cn(
+                        "text-xs font-bold px-1.5 py-0.5 rounded shrink-0 ml-2",
+                        att.percentage >= 75 ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                        : att.percentage >= 50 ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
+                        : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      )}>
+                        {att.totalClasses > 0 ? `${att.percentage.toFixed(0)}%` : "N/A"}
+                      </span>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+          </Collapsible>
+
+          {/* Inactive Users */}
+          <Collapsible
+            title="Not Active Students"
+            count={inactiveStudents.length}
+            defaultOpen={false}
+            badge={inactiveStudents.length > 0 ? <Badge variant="error">{inactiveStudents.length} inactive</Badge> : undefined}
+            className="mb-3"
+          >
+            {inactiveStudents.length === 0 ? (
+              <p className="text-center text-sm text-neutral-500 py-4">All approved students have been active recently.</p>
+            ) : (
+              <div className="space-y-2">
+                {inactiveStudents.map((student, idx) => {
+                  const lastDate = studentActivityMap[student.uid];
+                  const att = computeAttendance(student.initialAttendance, appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 });
+                  return (
+                    <motion.div
+                      key={student.uid}
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.18, delay: idx * 0.03 }}
+                      className="flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 dark:border-rose-900 dark:bg-rose-950/20 p-2.5"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                        <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
+                        <p className="text-[10px] text-rose-500 dark:text-rose-400 mt-0.5">
+                          {lastDate ? `Last active: ${lastDate}` : "Never marked attendance"}
+                        </p>
+                      </div>
+                      <span className={cn(
+                        "text-xs font-bold px-1.5 py-0.5 rounded shrink-0 ml-2",
+                        att.percentage >= 75 ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                        : att.percentage >= 50 ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400"
+                        : "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      )}>
+                        {att.totalClasses > 0 ? `${att.percentage.toFixed(0)}%` : "N/A"}
+                      </span>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
+          </Collapsible>
+
+          {/* Initial Attendance Section */}
+          <Card elevation={3} id="initial-attendance" className="mt-3">
           <CardHeader>
             <CardTitle>Set Initial Attendance</CardTitle>
             <CardDescription>
@@ -1546,11 +1831,18 @@ export default function AdminPage() {
             </form>
           </CardContent>
         </Card>
+        </motion.section>
+        )}
 
-        {/* Student Approval Section - REMOVED, now in collapsible Users section above */}
-
-        {/* ─── ATTENDANCE OVERVIEW SECTION ─── */}
-        <section id="attendance">
+        {currentSection === "attendance" && (
+        <motion.section
+          id="attendance"
+          key="attendance"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
           <h2 className="text-xl font-bold mb-4 sm:text-2xl">Attendance Overview</h2>
           <Card elevation={3}>
           <CardHeader>
@@ -1684,10 +1976,125 @@ export default function AdminPage() {
             )}
           </CardContent>
         </Card>
-        </section>
+        </motion.section>
+        )}
+
+        {/* ─── STUDENTS INFO SECTION ─── */}
+        {currentSection === "students" && (
+        <motion.section
+          id="students"
+          key="students"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
+          <h2 className="text-xl font-bold mb-1 sm:text-2xl">All Students</h2>
+          <p className="text-sm text-neutral-500 mb-4">Full profile + attendance for every registered student. Click the edit icon to update details.</p>
+
+          <div className="mb-4">
+            <SearchInput
+              value={studentsSearch}
+              onChange={setStudentsSearch}
+              placeholder="Search by name, reg no, email..."
+              className="w-full sm:w-72"
+            />
+          </div>
+
+          {students.length === 0 ? (
+            <Card><CardContent className="py-12 text-center text-sm text-neutral-500">No students registered yet.</CardContent></Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {students
+                .filter(s => {
+                  if (!studentsSearch) return true;
+                  const q = studentsSearch.toLowerCase();
+                  return s.name?.toLowerCase().includes(q) || s.regNo?.toLowerCase().includes(q) || s.email.toLowerCase().includes(q);
+                })
+                .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+                .map((student, idx) => {
+                  const app = appAttendanceMap[student.uid] || { appAttended: 0, appTotal: 0 };
+                  const att = computeAttendance(student.initialAttendance, app);
+                  const secName = sections.find(s => s.id === student.sectionId)?.name || "—";
+                  const statusColor = student.approved === true ? "text-emerald-600 dark:text-emerald-400" : student.approved === false ? "text-rose-500 dark:text-rose-400" : "text-amber-500 dark:text-amber-400";
+                  const statusLabel = student.approved === true ? "Approved" : student.approved === false ? "Rejected" : "Pending";
+                  return (
+                    <motion.div
+                      key={student.uid}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      transition={{ duration: 0.2, delay: idx * 0.04 }}
+                      whileHover={{ y: -3, boxShadow: "0 6px 20px rgba(0,0,0,0.09)", transition: { duration: 0.14 } }}
+                      className="rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 shadow-sm overflow-hidden"
+                    >
+                      <div className={cn("h-1.5", att.totalClasses === 0 ? "bg-neutral-200 dark:bg-neutral-800" : att.percentage >= 75 ? "bg-emerald-400" : att.percentage >= 50 ? "bg-amber-400" : "bg-rose-400")} />
+                      <div className="p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-sm truncate">{student.name || "—"}</p>
+                            <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo || "—"}</p>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span className={cn("text-[10px] font-semibold", statusColor)}>{statusLabel}</span>
+                            <button
+                              type="button"
+                              title="Edit student details"
+                              onClick={() => {
+                                setEditStudentUid(student.uid);
+                                setEditName(student.name || "");
+                                setEditRegNo(student.regNo || "");
+                                setEditBranch(student.branch || "");
+                                setEditPhone(student.phone || "");
+                                setEditSectionId(student.sectionId || "");
+                              }}
+                              className="ml-1 p-1 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+                          <div><span className="text-neutral-400">Email</span><p className="truncate text-neutral-700 dark:text-neutral-300">{student.email}</p></div>
+                          <div><span className="text-neutral-400">Phone</span><p className="truncate text-neutral-700 dark:text-neutral-300">{student.phone || "—"}</p></div>
+                          <div><span className="text-neutral-400">Branch</span><p className="truncate text-neutral-700 dark:text-neutral-300">{student.branch || "—"}</p></div>
+                          <div><span className="text-neutral-400">Section</span><p className="truncate text-neutral-700 dark:text-neutral-300">{secName}</p></div>
+                        </div>
+                        {student.approved === true && (
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[10px] text-neutral-400">Attendance</span>
+                              <span className={cn("text-xs font-bold", att.percentage >= 75 ? "text-emerald-600" : att.percentage >= 50 ? "text-amber-600" : "text-rose-600")}>
+                                {att.totalClasses > 0 ? `${att.percentage}%` : "N/A"}
+                              </span>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-neutral-100 dark:bg-neutral-800 overflow-hidden">
+                              <div
+                                className={cn("h-full rounded-full transition-all", att.percentage >= 75 ? "bg-emerald-400" : att.percentage >= 50 ? "bg-amber-400" : "bg-rose-400")}
+                                style={{ width: att.totalClasses > 0 ? `${Math.min(att.percentage, 100)}%` : "0%" }}
+                              />
+                            </div>
+                            <p className="text-[10px] text-neutral-400 mt-0.5">{att.totalAttended}/{att.totalClasses} classes</p>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  );
+                })}
+            </div>
+          )}
+        </motion.section>
+        )}
 
         {/* ─── TIMETABLE SECTION ─── */}
-        <section id="timetable">
+        {currentSection === "timetable" && (
+        <motion.section
+          id="timetable"
+          key="timetable"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
           <h2 className="text-xl font-bold mb-4 sm:text-2xl">Timetable Management</h2>
 
         {/* Two-column layout on desktop, stacked on mobile */}
@@ -1958,37 +2365,112 @@ export default function AdminPage() {
                               s => s.subject === slot.subject && s.start === slot.start && s.end === slot.end
                             );
                             const delKey = `${dayKey}-${origIdx}`;
+                            const slotKey = `${dayKey}-${origIdx}`;
+                            const isEditing = editSlotKey === slotKey;
                             return (
                               <div
                                 key={`${day}-${idx}`}
-                                className="flex items-center justify-between rounded border border-neutral-200 bg-neutral-50 p-2 dark:border-neutral-700 dark:bg-neutral-800"
+                                className="rounded border border-neutral-200 bg-neutral-50 dark:border-neutral-700 dark:bg-neutral-800 overflow-hidden"
                               >
-                                <div className="flex items-center gap-3">
-                                  <Clock className="h-4 w-4 text-neutral-500" />
-                                  <div>
-                                    <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                                      {slot.subject}
-                                    </p>
-                                    <p className="text-xs text-neutral-600 dark:text-neutral-400">
-                                      {slot.start} – {slot.end}
-                                      <span className="ml-2 text-blue-600 dark:text-blue-400">
-                                        ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
-                                      </span>
-                                    </p>
+                                {/* Row */}
+                                <div className="flex items-center justify-between p-2">
+                                  <div className="flex items-center gap-3">
+                                    <Clock className="h-4 w-4 shrink-0 text-neutral-500" />
+                                    <div>
+                                      <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">
+                                        {slot.subject}
+                                      </p>
+                                      <p className="text-xs text-neutral-600 dark:text-neutral-400">
+                                        {slot.start} – {slot.end}
+                                        <span className="ml-2 text-blue-600 dark:text-blue-400">
+                                          ({slot.classCount} class{slot.classCount > 1 ? 'es' : ''})
+                                        </span>
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <Button
+                                      size="sm"
+                                      variant="ghost"
+                                      className="h-7 w-7 p-0 text-neutral-500 hover:text-blue-600"
+                                      onClick={() => {
+                                        if (isEditing) {
+                                          setEditSlotKey(null);
+                                        } else {
+                                          setEditSlotKey(slotKey);
+                                          setEditSlotSubject(slot.subject);
+                                          setEditSlotStart(slot.start);
+                                          setEditSlotEnd(slot.end);
+                                        }
+                                      }}
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="destructive"
+                                      className="h-7 w-7 p-0"
+                                      disabled={isDeletingSlot === delKey}
+                                      onClick={() => handleDeleteSlot(dayKey, origIdx)}
+                                    >
+                                      {isDeletingSlot === delKey ? (
+                                        <LoadingSpinner size="sm" />
+                                      ) : (
+                                        <Trash2 className="h-3 w-3" />
+                                      )}
+                                    </Button>
                                   </div>
                                 </div>
-                                <Button
-                                  size="sm"
-                                  variant="destructive"
-                                  disabled={isDeletingSlot === delKey}
-                                  onClick={() => handleDeleteSlot(dayKey, origIdx)}
-                                >
-                                  {isDeletingSlot === delKey ? (
-                                    <LoadingSpinner size="sm" />
-                                  ) : (
-                                    <Trash2 className="h-3 w-3" />
-                                  )}
-                                </Button>
+                                {/* Inline edit form */}
+                                {isEditing && (
+                                  <div className="border-t border-neutral-200 dark:border-neutral-700 bg-neutral-100 dark:bg-neutral-900 p-3 space-y-2">
+                                    <input
+                                      type="text"
+                                      value={editSlotSubject}
+                                      onChange={e => setEditSlotSubject(e.target.value)}
+                                      placeholder="Subject name"
+                                      className="w-full rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-2 py-1.5 text-sm text-neutral-900 dark:text-neutral-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    />
+                                    <div className="flex gap-2">
+                                      <div className="flex-1 space-y-0.5">
+                                        <p className="text-[10px] text-neutral-500">Start</p>
+                                        <input
+                                          type="time"
+                                          value={editSlotStart}
+                                          onChange={e => setEditSlotStart(e.target.value)}
+                                          className="w-full rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-2 py-1.5 text-sm text-neutral-900 dark:text-neutral-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                      </div>
+                                      <div className="flex-1 space-y-0.5">
+                                        <p className="text-[10px] text-neutral-500">End</p>
+                                        <input
+                                          type="time"
+                                          value={editSlotEnd}
+                                          onChange={e => setEditSlotEnd(e.target.value)}
+                                          className="w-full rounded border border-neutral-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 px-2 py-1.5 text-sm text-neutral-900 dark:text-neutral-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                      </div>
+                                    </div>
+                                    <div className="flex gap-2 pt-1">
+                                      <Button
+                                        size="sm"
+                                        className="flex-1"
+                                        disabled={isSavingSlot || !editSlotSubject.trim() || !editSlotStart || !editSlotEnd}
+                                        onClick={() => handleSaveSlot(dayKey, origIdx)}
+                                      >
+                                        {isSavingSlot ? <LoadingSpinner size="sm" /> : <><Check className="h-3 w-3 mr-1" />Save</>}
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="flex-1"
+                                        onClick={() => setEditSlotKey(null)}
+                                      >
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -2106,10 +2588,19 @@ export default function AdminPage() {
             </div>
           </CardContent>
         </Card>
-        </section>
+        </motion.section>
+        )}
 
         {/* ─── DANGER ZONE SECTION ─── */}
-        <section id="settings">
+        {currentSection === "settings" && (
+        <motion.section
+          id="settings"
+          key="settings"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.22 }}
+        >
           <h2 className="text-xl font-bold mb-4 sm:text-2xl">Settings & Danger Zone</h2>
         
         {/* Semester Reset - Danger Zone */}
@@ -2186,7 +2677,68 @@ export default function AdminPage() {
             )}
           </CardContent>
         </Card>
-        </section>
+        </motion.section>
+        )}
+
+        </AnimatePresence>
+
+        {/* ─── EDIT STUDENT MODAL ─── */}
+        {editStudentUid && (() => {
+          const student = students.find(s => s.uid === editStudentUid);
+          if (!student) return null;
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+              <Card elevation={4} className="w-full max-w-md">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Pencil className="h-4 w-4" /> Edit Student Details
+                  </CardTitle>
+                  <CardDescription className="font-mono text-xs">{student.email}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1 col-span-2">
+                      <label className="text-xs font-medium text-neutral-600 dark:text-neutral-300">Full Name</label>
+                      <Input value={editName} onChange={e => setEditName(e.target.value)} placeholder="Full name" disabled={isSavingEdit} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-neutral-600 dark:text-neutral-300">Reg No</label>
+                      <Input value={editRegNo} onChange={e => setEditRegNo(e.target.value)} placeholder="Reg number" disabled={isSavingEdit} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-neutral-600 dark:text-neutral-300">Phone</label>
+                      <Input value={editPhone} onChange={e => setEditPhone(e.target.value)} placeholder="Phone" disabled={isSavingEdit} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-neutral-600 dark:text-neutral-300">Branch</label>
+                      <Input value={editBranch} onChange={e => setEditBranch(e.target.value)} placeholder="Branch" disabled={isSavingEdit} />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs font-medium text-neutral-600 dark:text-neutral-300">Section</label>
+                      <select
+                        value={editSectionId}
+                        onChange={e => setEditSectionId(e.target.value)}
+                        disabled={isSavingEdit}
+                        className="w-full rounded-md border border-neutral-200 bg-white px-3 py-2 text-sm dark:border-neutral-800 dark:bg-neutral-900"
+                      >
+                        <option value="">— No section —</option>
+                        {sections.map(s => (
+                          <option key={s.id} value={s.id}>{s.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 pt-2">
+                    <Button variant="outline" className="flex-1" onClick={() => setEditStudentUid(null)} disabled={isSavingEdit}>Cancel</Button>
+                    <Button className="flex-1" onClick={handleSaveEdit} disabled={isSavingEdit || !editName.trim()}>
+                      {isSavingEdit ? "Saving..." : "Save Changes"}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          );
+        })()}
 
         {/* ─── DELETE USER CONFIRMATION MODAL ─── */}
         {deleteUserUid && (() => {

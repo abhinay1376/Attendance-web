@@ -121,6 +121,8 @@ export default function RegisterPage() {
       }
 
       // Create Firestore user doc
+      // approved is intentionally NOT set — undefined means "pending"
+      // (approved: true = approved, approved: false = rejected, not set = pending)
       await setDoc(doc(db, "users", user.uid), {
         email: user.email,
         name: name.trim(),
@@ -128,7 +130,6 @@ export default function RegisterPage() {
         branch: branch.trim(),
         sectionId: sectionId,
         phone: phone,
-        approved: false,
         allowBackdatedAttendance: false,
         allowFutureAttendance: false,
         createdAt: Date.now(),
