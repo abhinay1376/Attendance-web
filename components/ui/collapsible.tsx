@@ -10,6 +10,8 @@ interface CollapsibleProps {
   subtitle?: string;
   count?: number;
   defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   children: React.ReactNode;
   className?: string;
   badge?: React.ReactNode;
@@ -20,17 +22,27 @@ export function Collapsible({
   subtitle,
   count,
   defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
   children,
   className,
   badge,
 }: CollapsibleProps) {
-  const [isOpen, setIsOpen] = React.useState(defaultOpen);
+  const [internalOpen, setInternalOpen] = React.useState(defaultOpen);
+  const isControlled = controlledOpen !== undefined;
+  const isOpen = isControlled ? controlledOpen : internalOpen;
+
+  const handleToggle = () => {
+    const next = !isOpen;
+    if (!isControlled) setInternalOpen(next);
+    onOpenChange?.(next);
+  };
 
   return (
     <div className={cn("rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950", className)}>
       <motion.button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={handleToggle}
         className="flex w-full items-center justify-between p-4 text-left transition-colors hover:bg-neutral-50 dark:hover:bg-neutral-900 rounded-lg"
         aria-expanded={isOpen}
         whileHover={{ y: -1, boxShadow: "0 3px 10px rgba(0,0,0,0.07)", transition: { duration: 0.12 } }}

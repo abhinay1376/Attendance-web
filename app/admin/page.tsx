@@ -272,6 +272,7 @@ export default function AdminPage() {
   // ─── NEW: Navigation & UI State ───
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [currentSection, setCurrentSection] = useState("dashboard");
+  const [userActivityFilter, setUserActivityFilter] = useState<"active" | "inactive" | null>(null);
 
   // ─── NEW: Notifications State ───
   const [notifications, setNotifications] = useState<Notification[]>([]);
@@ -1104,6 +1105,7 @@ export default function AdminPage() {
   });
 
   const menuItems = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { id: "users", label: "Users", icon: Users },
     { id: "students", label: "Students", icon: BookUser },
     { id: "attendance", label: "Attendance", icon: BarChart3 },
@@ -1283,13 +1285,13 @@ export default function AdminPage() {
           {/* Activity cards */}
           <div className="grid grid-cols-2 gap-2 sm:gap-4 mt-2 sm:mt-4">
             {[
-              { label: "Active Students", count: activeStudents.length, color: "emerald", icon: "active" },
-              { label: "Not Active", count: inactiveStudents.length, color: "rose", icon: "inactive" },
+              { label: "Active Students", count: activeStudents.length, color: "emerald", icon: "active", filter: "active" as const },
+              { label: "Not Active", count: inactiveStudents.length, color: "rose", icon: "inactive", filter: "inactive" as const },
             ].map((item, i) => (
               <motion.button
                 key={item.label}
                 type="button"
-                onClick={() => setCurrentSection("users")}
+                onClick={() => { setUserActivityFilter(item.filter); setCurrentSection("users"); }}
                 className={`text-left rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 shadow-sm transition-colors hover:border-${item.color}-300 hover:bg-${item.color}-50/50 dark:hover:bg-${item.color}-950/20`}
                 initial={{ opacity: 0, y: 16, rotateX: 6 }}
                 animate={{ opacity: 1, y: 0, rotateX: 0 }}
@@ -1636,6 +1638,8 @@ export default function AdminPage() {
             title="Active Students"
             count={activeStudents.length}
             defaultOpen={false}
+            open={userActivityFilter === "active" ? true : undefined}
+            onOpenChange={() => setUserActivityFilter(null)}
             badge={<Badge variant="success">{activeStudents.length} active</Badge>}
             className="mb-3"
           >
@@ -1681,6 +1685,8 @@ export default function AdminPage() {
             title="Not Active Students"
             count={inactiveStudents.length}
             defaultOpen={false}
+            open={userActivityFilter === "inactive" ? true : undefined}
+            onOpenChange={() => setUserActivityFilter(null)}
             badge={inactiveStudents.length > 0 ? <Badge variant="error">{inactiveStudents.length} inactive</Badge> : undefined}
             className="mb-3"
           >

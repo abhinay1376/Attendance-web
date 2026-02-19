@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { signOut } from "firebase/auth";
-import { collection, onSnapshot, doc, setDoc, getDoc } from "firebase/firestore";
+import { collection, onSnapshot, doc, setDoc, getDoc, updateDoc, deleteField, deleteDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { ADMIN_EMAIL } from "@/lib/constants";
@@ -66,6 +66,7 @@ export default function StudentPage() {
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [appAttended, setAppAttended] = useState(0);
   const [appTotal, setAppTotal] = useState(0);
+  const [allAttendanceDates, setAllAttendanceDates] = useState<Set<string>>(new Set());
   const [holidays, setHolidays] = useState<Set<string>>(new Set());
   const [holidayReasons, setHolidayReasons] = useState<Map<string, string>>(new Map());
   const [isApproved, setIsApproved] = useState<boolean>(false);
@@ -147,10 +148,17 @@ export default function StudentPage() {
     const unsubscribe = onSnapshot(collection(db, "attendance", user.uid, "dates"), (snapshot) => {
       let attended = 0;
       let total = 0;
+      const dates = new Set<string>();
 
       snapshot.forEach((doc) => {
         const data = doc.data() as PeriodAttendance;
-        Object.values(data).forEach((record) => {
+        const records = Object.values(data);
+
+        if (records.length > 0) {
+          dates.add(doc.id);
+        }
+
+        records.forEach((record) => {
           const count = record.classCount || 1;
           total += count;
           if (record.status === "PRESENT") {
@@ -161,6 +169,7 @@ export default function StudentPage() {
 
       setAppAttended(attended);
       setAppTotal(total);
+      setAllAttendanceDates(dates);
     });
 
     return () => unsubscribe();
@@ -236,8 +245,47 @@ export default function StudentPage() {
     router.push("/login");
   };
 
+  const handleUnmarkAttendance = async (slotKey: string) => {
+    if (!user) return;
+    const prevAttendance = attendance;
+    const newAttendance = { ...attendance };
+    delete newAttendance[slotKey];
+    const prevDates = new Set(allAttendanceDates);
+    setAttendance(newAttendance);
+    if (Object.keys(newAttendance).length === 0) {
+      setAllAttendanceDates((prev) => {
+        const next = new Set(prev);
+        next.delete(selectedDateStr);
+        return next;
+      });
+    }
+    setSubmitting((prev) => ({ ...prev, [slotKey]: true }));
+
+    try {
+      const attendanceDoc = doc(db, "attendance", user.uid, "dates", selectedDateStr);
+      await updateDoc(attendanceDoc, { [slotKey]: deleteField() });
+
+      if (Object.keys(newAttendance).length === 0) {
+        await deleteDoc(attendanceDoc);
+      }
+    } catch (error) {
+      console.error("Error unmarking attendance:", error);
+      setAttendance(prevAttendance);
+      setAllAttendanceDates(prevDates);
+      alert("Network error. Please try again.");
+    } finally {
+      setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
+    }
+  };
+
   const handleMarkAttendance = async (slotKey: string, slot: TimetableSlot, status: "PRESENT" | "ABSENT") => {
     if (!user) return;
+
+    // If same status clicked again → unmark (toggle off)
+    if (attendance[slotKey]?.status === status) {
+      await handleUnmarkAttendance(slotKey);
+      return;
+    }
 
     // Validate date
     if (selectedDateStr > today && !allowFutureAttendance) {
@@ -266,7 +314,13 @@ export default function StudentPage() {
       classCount: slot.classCount || 1,
     };
     const prevAttendance = attendance;
+    const prevDates = new Set(allAttendanceDates);
     setAttendance((prev) => ({ ...prev, [slotKey]: record }));
+    setAllAttendanceDates((prev) => {
+      const next = new Set(prev);
+      next.add(selectedDateStr);
+      return next;
+    });
     setSubmitting((prev) => ({ ...prev, [slotKey]: true }));
 
     try {
@@ -276,31 +330,12 @@ export default function StudentPage() {
       console.error("Error marking attendance:", error);
       // Revert optimistic update on failure
       setAttendance(prevAttendance);
+      setAllAttendanceDates(prevDates);
       alert("Network error. Please try again.");
     } finally {
       setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
     }
   };
-
-  if (loading || profileLoading || pageLoading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
-
-  if (!user || role === "admin") {
-    return null;
-  }
-
-  if (role !== "student") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
 
   // Date validation
   const cutoffDate = initialAttendance ? new Date(initialAttendance.uptoDate) : null;
@@ -322,6 +357,66 @@ export default function StudentPage() {
     if (date.getDay() === 0) return true;
     return false;
   };
+
+  // ─── CALENDAR MODIFIERS: green = marked, red = missed ───
+  const { markedDates, missedDates } = useMemo(() => {
+    const marked: Date[] = [];
+    const missed: Date[] = [];
+
+    const cutoffStr = cutoffDate ? format(cutoffDate, "yyyy-MM-dd") : null;
+    // Start from 60 days ago or cutoff date, whichever is later - keeps list manageable
+    const rangeStart = new Date();
+    rangeStart.setDate(rangeStart.getDate() - 90);
+    if (cutoffDate && cutoffDate > rangeStart) {
+      rangeStart.setTime(cutoffDate.getTime() + 86400000);
+    }
+
+    const rangeEnd = new Date(); // today
+    let current = new Date(rangeStart);
+
+    while (current <= rangeEnd) {
+      const dateStr = format(current, "yyyy-MM-dd");
+      // Skip if before/on cutoff, holiday, or Sunday
+      if (cutoffStr && dateStr <= cutoffStr) { current = new Date(current.getTime() + 86400000); continue; }
+      if (holidays.has(dateStr)) { current = new Date(current.getTime() + 86400000); continue; }
+      if (current.getDay() === 0) { current = new Date(current.getTime() + 86400000); continue; }
+
+      // Check if there are classes for this day in the timetable
+      const dayKey = format(current, "EEEE").toLowerCase();
+      const slots = sectionTimetable[dayKey] || [];
+
+      if (slots.length > 0) {
+        if (allAttendanceDates.has(dateStr)) {
+          marked.push(new Date(current));
+        } else {
+          missed.push(new Date(current));
+        }
+      }
+      current = new Date(current.getTime() + 86400000);
+    }
+
+    return { markedDates: marked, missedDates: missed };
+  }, [cutoffDate, holidays, sectionTimetable, allAttendanceDates, today]);
+
+  if (loading || profileLoading || pageLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!user || role === "admin") {
+    return null;
+  }
+
+  if (role !== "student") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
 
   const isSelectedDateValid = !isDateDisabled(selectedDate);
   const isHoliday = holidays.has(selectedDateStr);
@@ -600,6 +695,7 @@ export default function StudentPage() {
                       selected={selectedDate}
                       onSelect={(date) => { if (date && !isDateDisabled(date)) setSelectedDate(date); }}
                       disabled={isDateDisabled}
+                      modifiers={{ marked: markedDates, missed: missedDates }}
                       initialFocus
                       className="rounded-md border-0"
                     />
@@ -697,28 +793,30 @@ export default function StudentPage() {
                             <button
                               onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
                               disabled={submitting[slotKey]}
+                              title={record?.status === "PRESENT" ? "Click to unmark" : "Mark as Present"}
                               className={cn(
-                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-all",
                                 record?.status === "PRESENT"
-                                  ? "bg-emerald-500 border-emerald-500 text-white cursor-default"
+                                  ? "bg-emerald-500 border-emerald-500 text-white hover:bg-emerald-600 hover:border-emerald-600"
                                   : "bg-white dark:bg-neutral-900 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40",
                                 submitting[slotKey] && "opacity-60 cursor-not-allowed"
                               )}
                             >
-                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present" : "Present"}
+                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present ×" : "Present"}
                             </button>
                             <button
                               onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
                               disabled={submitting[slotKey]}
+                              title={record?.status === "ABSENT" ? "Click to unmark" : "Mark as Absent"}
                               className={cn(
-                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-all",
                                 record?.status === "ABSENT"
-                                  ? "bg-rose-500 border-rose-500 text-white cursor-default"
+                                  ? "bg-rose-500 border-rose-500 text-white hover:bg-rose-600 hover:border-rose-600"
                                   : "bg-white dark:bg-neutral-900 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40",
                                 submitting[slotKey] && "opacity-60 cursor-not-allowed"
                               )}
                             >
-                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent" : "Absent"}
+                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent ×" : "Absent"}
                             </button>
                           </div>
                         </CardContent>
@@ -767,6 +865,7 @@ export default function StudentPage() {
                     }
                   }}
                   disabled={isDateDisabled}
+                  modifiers={{ marked: markedDates, missed: missedDates }}
                   initialFocus
                   className="rounded-md border-0"
                 />
@@ -899,29 +998,31 @@ export default function StudentPage() {
                               onClick={() => handleMarkAttendance(slotKey, slot, "PRESENT")}
                               disabled={submitting[slotKey]}
                               aria-label={`Mark present for ${slot.start}–${slot.end}`}
+                              title={record?.status === "PRESENT" ? "Click to unmark" : "Mark as Present"}
                               className={cn(
-                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-all",
                                 record?.status === "PRESENT"
-                                  ? "bg-emerald-500 border-emerald-500 text-white cursor-default"
+                                  ? "bg-emerald-500 border-emerald-500 text-white hover:bg-emerald-600 hover:border-emerald-600"
                                   : "bg-white dark:bg-neutral-900 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40",
                                 submitting[slotKey] && "opacity-60 cursor-not-allowed"
                               )}
                             >
-                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present" : "Present"}
+                              {submitting[slotKey] ? "..." : record?.status === "PRESENT" ? "✓ Present ×" : "Present"}
                             </button>
                             <button
                               onClick={() => handleMarkAttendance(slotKey, slot, "ABSENT")}
                               disabled={submitting[slotKey]}
                               aria-label={`Mark absent for ${slot.start}–${slot.end}`}
+                              title={record?.status === "ABSENT" ? "Click to unmark" : "Mark as Absent"}
                               className={cn(
-                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-colors",
+                                "flex-1 rounded-lg py-2.5 text-xs sm:text-sm font-medium border transition-all",
                                 record?.status === "ABSENT"
-                                  ? "bg-rose-500 border-rose-500 text-white cursor-default"
+                                  ? "bg-rose-500 border-rose-500 text-white hover:bg-rose-600 hover:border-rose-600"
                                   : "bg-white dark:bg-neutral-900 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40",
                                 submitting[slotKey] && "opacity-60 cursor-not-allowed"
                               )}
                             >
-                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent" : "Absent"}
+                              {submitting[slotKey] ? "..." : record?.status === "ABSENT" ? "✗ Absent ×" : "Absent"}
                             </button>
                           </div>
                       </CardContent>
