@@ -15,8 +15,9 @@ import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PageTransition } from "@/components/page-transition";
-import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings, BookUser, Pencil, Check } from "lucide-react";
+import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings, BookUser, Pencil, Check, Sun, Moon } from "lucide-react";
 import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "@/lib/utils";
@@ -46,6 +47,7 @@ interface StudentInfo {
   approved?: boolean;
   allowBackdatedAttendance?: boolean;
   allowFutureAttendance?: boolean;
+  createdAt?: number;
   initialAttendance?: {
     attended: number;
     total: number;
@@ -258,6 +260,8 @@ export default function AdminPage() {
   const [uptoDate, setUptoDate] = useState("");
   const [uptoDateCalendar, setUptoDateCalendar] = useState<Date | undefined>(undefined);
   const [isSavingInitial, setIsSavingInitial] = useState(false);
+  const [studentPickerOpen, setStudentPickerOpen] = useState(false);
+  const [studentPickerSearch, setStudentPickerSearch] = useState("");
 
   // Holiday state
   const [holidayDate, setHolidayDate] = useState<Date | undefined>(new Date());
@@ -382,6 +386,7 @@ export default function AdminPage() {
             phone: data.phone,
             approved: data.approved,
             allowBackdatedAttendance: data.allowBackdatedAttendance,
+            createdAt: data.createdAt,
             initialAttendance: data.initialAttendance,
           });
         }
@@ -409,6 +414,7 @@ export default function AdminPage() {
             approved: data.approved,
             allowBackdatedAttendance: data.allowBackdatedAttendance,
             allowFutureAttendance: data.allowFutureAttendance,
+            createdAt: data.createdAt,
             initialAttendance: data.initialAttendance,
           });
         }
@@ -550,6 +556,20 @@ export default function AdminPage() {
       unsubscribers.forEach(unsub => unsub());
     };
   }, [user, students]);
+
+  const [isDark, setIsDark] = useState(false);
+  useEffect(() => {
+    const saved = localStorage.getItem("theme");
+    const prefersDark = saved === "dark" || (!saved && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    setIsDark(prefersDark);
+    document.documentElement.classList.toggle("dark", prefersDark);
+  }, []);
+  const toggleTheme = () => {
+    const next = !isDark;
+    setIsDark(next);
+    document.documentElement.classList.toggle("dark", next);
+    localStorage.setItem("theme", next ? "dark" : "light");
+  };
 
   const handleSignOut = async () => {
     await signOut(auth);
@@ -1021,8 +1041,57 @@ export default function AdminPage() {
 
   if (loading || profileLoading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <LoadingSpinner size="lg" />
+      <div className="flex min-h-screen bg-background">
+        {/* Sidebar skeleton */}
+        <div className="hidden lg:flex w-64 flex-col border-r border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 p-4 gap-3">
+          <Skeleton className="h-8 w-36 mb-4" />
+          {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-9 w-full rounded-lg" />)}
+          <div className="mt-auto flex flex-col gap-2">
+            <Skeleton className="h-9 w-full rounded-lg" />
+          </div>
+        </div>
+        {/* Main content skeleton */}
+        <div className="flex-1 flex flex-col">
+          {/* Header skeleton */}
+          <div className="h-14 border-b border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 px-4 flex items-center justify-between">
+            <Skeleton className="h-5 w-40" />
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-8 w-8 rounded-full" />
+              <Skeleton className="h-8 w-20 rounded-lg" />
+              <Skeleton className="h-8 w-8 rounded-lg" />
+            </div>
+          </div>
+          {/* Content skeleton */}
+          <div className="p-4 lg:p-6 space-y-6">
+            {/* Stat cards */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {[...Array(4)].map((_, i) => (
+                <div key={i} className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 space-y-3">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-8 w-12" />
+                  <Skeleton className="h-3 w-16" />
+                </div>
+              ))}
+            </div>
+            {/* Table skeleton */}
+            <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 space-y-3">
+              <Skeleton className="h-5 w-48 mb-4" />
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="flex items-center gap-4">
+                  <Skeleton className="h-8 w-8 rounded-full" />
+                  <Skeleton className="h-4 flex-1" />
+                  <Skeleton className="h-4 w-16" />
+                  <Skeleton className="h-6 w-20 rounded-full" />
+                </div>
+              ))}
+            </div>
+            {/* Second block skeleton */}
+            <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 p-4 space-y-4">
+              <Skeleton className="h-5 w-40" />
+              <Skeleton className="h-48 w-full rounded-lg" />
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1145,6 +1214,14 @@ export default function AdminPage() {
               <span className="hidden text-sm text-neutral-600 dark:text-neutral-400 sm:block">
                 {user.email}
               </span>
+              <button
+                onClick={toggleTheme}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-100 transition-colors border border-neutral-200 dark:border-neutral-700"
+                title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+              >
+                {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                <span className="hidden sm:inline text-xs font-medium">{isDark ? "Light" : "Dark"}</span>
+              </button>
               <Button variant="outline" size="sm" onClick={handleSignOut}>
                 <LogOut className="h-4 w-4 sm:mr-2" />
                 <span className="hidden sm:inline">Sign Out</span>
@@ -1223,6 +1300,20 @@ export default function AdminPage() {
                           </button>
                         );
                       })}
+
+                      {/* Back to Dashboard */}
+                      {currentSection !== "dashboard" && (
+                        <button
+                          type="button"
+                          onClick={() => { setCurrentSection("dashboard"); setMobileMenuOpen(false); }}
+                          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-50 mt-2 pt-3 border-t border-neutral-100 dark:border-neutral-800"
+                        >
+                          <LayoutDashboard className="h-4 w-4" />
+                          Back to Dashboard
+                        </button>
+                      )}
+
+
                     </nav>
                   </motion.aside>
                 </>
@@ -1487,7 +1578,12 @@ export default function AdminPage() {
                       {/* Header row */}
                       <div className="flex items-start justify-between gap-2 mb-2">
                         <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold truncate">{student.name || "No Name"}</p>
+                          <button
+                            className="text-sm font-semibold truncate text-indigo-600 hover:text-indigo-800 hover:underline dark:text-indigo-400 dark:hover:text-indigo-300 text-left"
+                            onClick={() => router.push(`/admin/student/${student.uid}`)}
+                          >
+                            {student.name || "No Name"}
+                          </button>
                           <p className="text-xs text-neutral-500 font-mono truncate">{student.regNo}</p>
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
@@ -1737,24 +1833,108 @@ export default function AdminPage() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSaveInitialAttendance} className="space-y-4">
+              {/* ─── CUSTOM SEARCHABLE STUDENT PICKER ─── */}
               <div className="space-y-2">
                 <label className="text-sm font-medium text-neutral-700 dark:text-neutral-200">
                   Select Student
                 </label>
-                <select
-                  className="w-full rounded-md border border-neutral-200 bg-white px-3 py-2 text-sm dark:border-neutral-800 dark:bg-neutral-900"
-                  value={selectedStudentUid}
-                  onChange={(e) => setSelectedStudentUid(e.target.value)}
-                  disabled={isSavingInitial}
-                >
-                  <option value="">Select a student</option>
-                  {students.map((student) => (
-                    <option key={student.uid} value={student.uid}>
-                      {student.email}
-                      {student.initialAttendance && ` (Current: ${student.initialAttendance.attended}/${student.initialAttendance.total})`}
-                    </option>
-                  ))}
-                </select>
+                {(() => {
+                  const sorted = [...students].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+                  const filtered = sorted.filter((s) => {
+                    const q = studentPickerSearch.toLowerCase();
+                    return (
+                      (s.name ?? "").toLowerCase().includes(q) ||
+                      s.email.toLowerCase().includes(q) ||
+                      (s.regNo ?? "").toLowerCase().includes(q)
+                    );
+                  });
+                  const selected = students.find((s) => s.uid === selectedStudentUid);
+                  return (
+                    <div className="relative">
+                      {/* Trigger button */}
+                      <button
+                        type="button"
+                        disabled={isSavingInitial}
+                        onClick={() => setStudentPickerOpen((v) => !v)}
+                        className="w-full flex items-center justify-between rounded-md border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-900 px-3 py-2 text-sm text-left focus:outline-none focus:ring-2 focus:ring-primary/40 disabled:opacity-50"
+                      >
+                        <span className={selected ? "" : "text-neutral-400"}>
+                          {selected
+                            ? `${selected.name ? selected.name + " – " : ""}${selected.email}${
+                                selected.initialAttendance
+                                  ? ` (${selected.initialAttendance.attended}/${selected.initialAttendance.total})`
+                                  : ""
+                              }`
+                            : "Select a student"}
+                        </span>
+                        <ChevronDown className={cn("h-4 w-4 text-neutral-400 transition-transform", studentPickerOpen && "rotate-180")} />
+                      </button>
+
+                      {/* Dropdown panel */}
+                      {studentPickerOpen && (
+                        <div className="absolute z-50 mt-1 w-full rounded-md border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 shadow-lg">
+                          {/* Search input */}
+                          <div className="p-2 border-b border-neutral-100 dark:border-neutral-800">
+                            <div className="flex items-center gap-2 rounded-md border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 px-2 py-1">
+                              <Search className="h-3.5 w-3.5 text-neutral-400 shrink-0" />
+                              <input
+                                autoFocus
+                                className="flex-1 bg-transparent text-sm outline-none placeholder:text-neutral-400"
+                                placeholder="Search by name, email or reg no..."
+                                value={studentPickerSearch}
+                                onChange={(e) => setStudentPickerSearch(e.target.value)}
+                              />
+                              {studentPickerSearch && (
+                                <button type="button" onClick={() => setStudentPickerSearch("")} className="text-neutral-400 hover:text-neutral-600">
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Option: clear */}
+                          <button
+                            type="button"
+                            onClick={() => { setSelectedStudentUid(""); setStudentPickerOpen(false); setStudentPickerSearch(""); }}
+                            className="w-full text-left px-3 py-2 text-sm text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-900 border-b border-neutral-100 dark:border-neutral-800"
+                          >
+                            — None selected —
+                          </button>
+
+                          {/* Student list */}
+                          <div className="max-h-56 overflow-y-auto">
+                            {filtered.length === 0 ? (
+                              <p className="text-center text-xs text-neutral-400 py-4">No students found</p>
+                            ) : (
+                              filtered.map((s) => (
+                                <button
+                                  key={s.uid}
+                                  type="button"
+                                  onClick={() => { setSelectedStudentUid(s.uid); setStudentPickerOpen(false); setStudentPickerSearch(""); }}
+                                  className={cn(
+                                    "w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 dark:hover:bg-neutral-900 transition-colors",
+                                    s.uid === selectedStudentUid && "bg-primary/10 text-primary"
+                                  )}
+                                >
+                                  <span className="font-medium block truncate">
+                                    {s.name || <span className="italic text-neutral-400">No name</span>}
+                                    {s.regNo && <span className="ml-1.5 text-[10px] text-neutral-400 font-normal font-mono">{s.regNo}</span>}
+                                  </span>
+                                  <span className="text-xs text-neutral-500 block truncate">
+                                    {s.email}
+                                    {s.initialAttendance && (
+                                      <span className="ml-1.5 text-blue-500">({s.initialAttendance.attended}/{s.initialAttendance.total})</span>
+                                    )}
+                                  </span>
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -1859,8 +2039,15 @@ export default function AdminPage() {
           </CardHeader>
           <CardContent>
             {attendanceLoading ? (
-              <div className="flex items-center justify-center py-8">
-                <LoadingSpinner size="md" />
+              <div className="space-y-3 py-2">
+                {[...Array(5)].map((_, i) => (
+                  <div key={i} className="flex items-center gap-4">
+                    <Skeleton className="h-8 w-8 rounded-full" />
+                    <Skeleton className="h-4 flex-1" />
+                    <Skeleton className="h-4 w-16" />
+                    <Skeleton className="h-6 w-20 rounded-full" />
+                  </div>
+                ))}
               </div>
             ) : approvedStudents.length === 0 ? (
               <div className="py-12 text-center">
@@ -1935,10 +2122,14 @@ export default function AdminPage() {
                           return (
                             <tr
                               key={student.uid}
-                              className={idx % 2 === 0 ? "bg-white dark:bg-neutral-950" : "bg-neutral-50/50 dark:bg-neutral-900/50"}
+                              onClick={() => router.push(`/admin/student/${student.uid}`)}
+                              className={cn(
+                                "cursor-pointer transition-colors hover:bg-primary/5",
+                                idx % 2 === 0 ? "bg-white dark:bg-neutral-950" : "bg-neutral-50/50 dark:bg-neutral-900/50"
+                              )}
                             >
                               <td className="py-3 pr-3">
-                                <p className="font-medium text-neutral-900 dark:text-neutral-50 truncate max-w-[160px]">
+                                <p className="font-medium text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 truncate max-w-[160px]">
                                   {student.name || "No Name"}
                                 </p>
                                 <p className="text-xs text-neutral-500 font-mono truncate max-w-[160px]">
