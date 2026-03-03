@@ -660,33 +660,36 @@ export default function AdminPage() {
 
   const handleAddHoliday = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!holidayDate || !holidayReason.trim()) return;
+    if (!holidayDate || !holidayReason.trim() || !user) return;
 
     const dateStr = format(holidayDate, "yyyy-MM-dd");
     setIsAddingHoliday(true);
 
     try {
-      // Log the action
-      await addDoc(collection(db, "auditLog"), {
-        action: "HOLIDAY_CREATED",
-        date: dateStr,
-        reason: holidayReason.trim(),
-        performedBy: user?.email,
-        timestamp: Date.now(),
+      // Get a fresh ID token to authenticate the server-side API call
+      const adminToken = await user.getIdToken();
+
+      const res = await fetch("/api/mark-holiday", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: dateStr,
+          reason: holidayReason.trim(),
+          adminToken,
+        }),
       });
 
-      // Create holiday
-      await setDoc(doc(db, "holidays", dateStr), {
-        reason: holidayReason.trim(),
-        createdAt: Date.now(),
-        markedBy: "admin",
-      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to mark holiday");
+      }
 
       setHolidayReason("");
-      alert("Holiday marked successfully");
+      alert(data.message ?? "Holiday marked successfully");
     } catch (error) {
       console.error("Error marking holiday:", error);
-      alert("Error marking holiday");
+      alert(error instanceof Error ? error.message : "Error marking holiday");
     } finally {
       setIsAddingHoliday(false);
     }

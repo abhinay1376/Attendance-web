@@ -65,11 +65,15 @@ service cloud.firestore {
     match /attendance/{userId}/{document=**} {
       // Users can read their own attendance; admin can read ALL for overview
       allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
-      
-      // Users can ONLY write attendance if they are approved
-      allow write: if request.auth != null 
+    }
+
+    // Attendance date-level write rule
+    // Enforces: approved students only, and date must NOT be a holiday
+    match /attendance/{userId}/dates/{date} {
+      allow write: if request.auth != null
                    && request.auth.uid == userId
-                   && isApproved(userId);
+                   && isApproved(userId)
+                   && !exists(/databases/$(database)/documents/holidays/$(date));
     }
     
     // Audit log
