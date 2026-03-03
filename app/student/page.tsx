@@ -88,6 +88,7 @@ export default function StudentPage() {
   const [rawDateRecords, setRawDateRecords] = useState<Record<string, Record<string, AttendanceRecord>>>({});
   const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("all");
   const [isDark, setIsDark] = useState(false);
+  const [isBulkSubmitting, setIsBulkSubmitting] = useState<"PRESENT" | "ABSENT" | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("theme");
@@ -355,6 +356,61 @@ export default function StudentPage() {
       alert("Network error. Please try again.");
     } finally {
       setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
+    }
+  };
+
+  const handleMarkAllDay = async (status: "PRESENT" | "ABSENT") => {
+    if (!user || slotsForDate.length === 0) return;
+
+    if (selectedDateStr > today && !allowFutureAttendance) {
+      alert("Cannot mark attendance for future dates.");
+      return;
+    }
+    if (selectedDateStr > today && allowFutureAttendance) {
+      const maxFutureDate = new Date();
+      maxFutureDate.setDate(maxFutureDate.getDate() + 7);
+      if (new Date(selectedDateStr) > maxFutureDate) {
+        alert("Cannot mark attendance more than 7 days in advance.");
+        return;
+      }
+    }
+    if (holidays.has(selectedDateStr)) {
+      alert("Cannot mark attendance on a holiday.");
+      return;
+    }
+
+    setIsBulkSubmitting(status);
+    const now = Date.now();
+    const newRecords: PeriodAttendance = {};
+    for (const slot of slotsForDate) {
+      const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
+      newRecords[slotKey] = {
+        subjectId: slot.subject,
+        status,
+        timestamp: now,
+        classCount: slot.classCount || 1,
+      };
+    }
+
+    const prevAttendance = attendance;
+    const prevDates = new Set(allAttendanceDates);
+    setAttendance((prev) => ({ ...prev, ...newRecords }));
+    setAllAttendanceDates((prev) => {
+      const next = new Set(prev);
+      next.add(selectedDateStr);
+      return next;
+    });
+
+    try {
+      const attendanceDoc = doc(db, "attendance", user.uid, "dates", selectedDateStr);
+      await setDoc(attendanceDoc, newRecords, { merge: true });
+    } catch (error) {
+      console.error("Error bulk marking attendance:", error);
+      setAttendance(prevAttendance);
+      setAllAttendanceDates(prevDates);
+      alert("Network error. Please try again.");
+    } finally {
+      setIsBulkSubmitting(null);
     }
   };
 
@@ -1015,7 +1071,34 @@ export default function StudentPage() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <>
+                <div className="flex flex-col sm:flex-row gap-2 mb-4">
+                  <button
+                    onClick={() => handleMarkAllDay("PRESENT")}
+                    disabled={isBulkSubmitting !== null || Object.values(submitting).some(Boolean)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-sm font-semibold border transition-all",
+                      "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/60",
+                      (isBulkSubmitting !== null || Object.values(submitting).some(Boolean)) && "opacity-60 cursor-not-allowed"
+                    )}
+                  >
+                    <CheckCircle className="h-4 w-4" />
+                    {isBulkSubmitting === "PRESENT" ? "Marking..." : "Mark All Present"}
+                  </button>
+                  <button
+                    onClick={() => handleMarkAllDay("ABSENT")}
+                    disabled={isBulkSubmitting !== null || Object.values(submitting).some(Boolean)}
+                    className={cn(
+                      "flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-sm font-semibold border transition-all",
+                      "bg-rose-50 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60",
+                      (isBulkSubmitting !== null || Object.values(submitting).some(Boolean)) && "opacity-60 cursor-not-allowed"
+                    )}
+                  >
+                    <XCircle className="h-4 w-4" />
+                    {isBulkSubmitting === "ABSENT" ? "Marking..." : "Mark All Absent"}
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {slotsForDate.map((slot, index) => {
                   const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
                   const isSubmitted = !!attendance[slotKey];
@@ -1086,6 +1169,7 @@ export default function StudentPage() {
                   );
                 })}
               </div>
+              </>
             )}
           </div>
 
@@ -1200,7 +1284,34 @@ export default function StudentPage() {
               </CardContent>
             </Card>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <>
+              <div className="flex flex-col sm:flex-row gap-2 mb-4">
+                <button
+                  onClick={() => handleMarkAllDay("PRESENT")}
+                  disabled={isBulkSubmitting !== null || Object.values(submitting).some(Boolean)}
+                  className={cn(
+                    "flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-sm font-semibold border transition-all",
+                    "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-100 dark:hover:bg-emerald-900/60",
+                    (isBulkSubmitting !== null || Object.values(submitting).some(Boolean)) && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  <CheckCircle className="h-4 w-4" />
+                  {isBulkSubmitting === "PRESENT" ? "Marking..." : "Mark All Present"}
+                </button>
+                <button
+                  onClick={() => handleMarkAllDay("ABSENT")}
+                  disabled={isBulkSubmitting !== null || Object.values(submitting).some(Boolean)}
+                  className={cn(
+                    "flex-1 flex items-center justify-center gap-2 rounded-lg py-2.5 px-4 text-sm font-semibold border transition-all",
+                    "bg-rose-50 dark:bg-rose-950/40 border-rose-300 dark:border-rose-700 text-rose-700 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60",
+                    (isBulkSubmitting !== null || Object.values(submitting).some(Boolean)) && "opacity-60 cursor-not-allowed"
+                  )}
+                >
+                  <XCircle className="h-4 w-4" />
+                  {isBulkSubmitting === "ABSENT" ? "Marking..." : "Mark All Absent"}
+                </button>
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {slotsForDate.map((slot, index) => {
                 const slotKey = `${slot.subject}_${slot.start}_${slot.end}`;
                 const isSubmitted = !!attendance[slotKey];
@@ -1292,6 +1403,7 @@ export default function StudentPage() {
                 );
               })}
                 </div>
+              </>
               )}
           </div>
         </motion.section>
