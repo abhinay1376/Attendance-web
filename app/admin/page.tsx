@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageTransition } from "@/components/page-transition";
+import { useToast } from "@/components/ui/toast";
 import { CalendarIcon, AlertTriangle, Trash2, Clock, UserX, Bell, ChevronDown, Search, RotateCcw, Users, LayoutDashboard, BarChart3, FileText, Menu, X, LogOut, Settings, BookUser, Pencil, Check, Sun, Moon } from "lucide-react";
 import { format } from "date-fns";
 import { motion, AnimatePresence } from "framer-motion";
@@ -111,6 +112,7 @@ function sectionNameToLetter(sectionName: string): string {
 export default function AdminPage() {
   const router = useRouter();
   const { user, role, loading, profileLoading } = useAuth();
+  const toast = useToast();
 
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [periods, setPeriods] = useState<Period[]>([]);
@@ -162,7 +164,7 @@ export default function AdminPage() {
   const handleAddSlot = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!viewSection || !newSlotDay || !newSlotSubject.trim() || !newSlotStart || !newSlotEnd) return;
-    if (previewClassCount <= 0) { alert("End time must be after start time."); return; }
+    if (previewClassCount <= 0) { toast.info("End time must be after start time."); return; }
 
     setIsAddingSlot(true);
     try {
@@ -175,7 +177,7 @@ export default function AdminPage() {
 
       // Duplicate check
       const dup = daySlots.some(s => s.start === newSlotStart && s.end === newSlotEnd);
-      if (dup) { alert("A slot with the same time already exists."); setIsAddingSlot(false); return; }
+      if (dup) { toast.info("A slot with the same time already exists."); setIsAddingSlot(false); return; }
 
       daySlots.push({ subject: newSlotSubject.trim(), start: newSlotStart, end: newSlotEnd, classCount: previewClassCount });
       daySlots.sort((a, b) => a.start.localeCompare(b.start));
@@ -189,7 +191,7 @@ export default function AdminPage() {
       setNewSlotEnd("");
     } catch (error) {
       console.error("Error adding slot:", error);
-      alert("Error adding timetable entry");
+      toast.error("Error adding timetable entry");
     } finally {
       setIsAddingSlot(false);
     }
@@ -218,7 +220,7 @@ export default function AdminPage() {
       setEditSlotKey(null);
     } catch (error) {
       console.error("Error saving slot:", error);
-      alert("Error saving timetable entry");
+      toast.error("Error saving timetable entry");
     } finally {
       setIsSavingSlot(false);
     }
@@ -242,7 +244,7 @@ export default function AdminPage() {
       await setDoc(timetableRef, { ...data, sections }, { merge: true });
     } catch (error) {
       console.error("Error deleting slot:", error);
-      alert("Error deleting timetable entry");
+      toast.error("Error deleting timetable entry");
     } finally {
       setIsDeletingSlot(null);
     }
@@ -630,7 +632,7 @@ export default function AdminPage() {
     const totalNum = parseInt(total);
 
     if (isNaN(attendedNum) || isNaN(totalNum) || attendedNum < 0 || totalNum < 0 || attendedNum > totalNum) {
-      alert("Invalid attendance numbers");
+      toast.error("Invalid attendance numbers");
       return;
     }
 
@@ -649,10 +651,10 @@ export default function AdminPage() {
       setAttended("");
       setTotal("");
       setUptoDate("");
-      alert("Initial attendance saved successfully");
+      toast.success("Initial attendance saved successfully");
     } catch (error) {
       console.error("Error saving initial attendance:", error);
-      alert("Error saving initial attendance");
+      toast.error("Error saving initial attendance");
     } finally {
       setIsSavingInitial(false);
     }
@@ -686,10 +688,10 @@ export default function AdminPage() {
       }
 
       setHolidayReason("");
-      alert(data.message ?? "Holiday marked successfully");
+      toast.error(data.message ?? "Holiday marked successfully");
     } catch (error) {
       console.error("Error marking holiday:", error);
-      alert(error instanceof Error ? error.message : "Error marking holiday");
+      toast.error(error instanceof Error ? error.message : "Error marking holiday");
     } finally {
       setIsAddingHoliday(false);
     }
@@ -707,10 +709,10 @@ export default function AdminPage() {
         timestamp: Date.now(),
       });
 
-      alert("Student approved successfully");
+      toast.success("Student approved successfully");
     } catch (error) {
       console.error("Error approving student:", error);
-      alert("Error approving student");
+      toast.error("Error approving student");
     }
   };
 
@@ -730,10 +732,10 @@ export default function AdminPage() {
         timestamp: Date.now(),
       });
 
-      alert("Student rejected");
+      toast.success("Student rejected");
     } catch (error) {
       console.error("Error rejecting student:", error);
-      alert("Error rejecting student");
+      toast.error("Error rejecting student");
     }
   };
 
@@ -751,7 +753,7 @@ export default function AdminPage() {
       });
     } catch (error) {
       console.error("Error toggling backdated attendance:", error);
-      alert("Error updating backdated attendance permission");
+      toast.error("Error updating backdated attendance permission");
     }
   };
 
@@ -769,7 +771,7 @@ export default function AdminPage() {
       });
     } catch (error) {
       console.error("Error toggling future attendance:", error);
-      alert("Error updating future attendance permission");
+      toast.error("Error updating future attendance permission");
     }
   };
 
@@ -825,7 +827,7 @@ export default function AdminPage() {
       });
     } catch (error) {
       console.error("Error restoring user:", error);
-      alert("Error restoring user");
+      toast.error("Error restoring user");
     } finally {
       setRestoringUser(null);
     }
@@ -866,10 +868,10 @@ export default function AdminPage() {
         active: true,
       });
       setSectionName("");
-      alert("Section added successfully");
+      toast.success("Section added successfully");
     } catch (error) {
       console.error("Error adding section:", error);
-      alert("Error adding section");
+      toast.error("Error adding section");
     } finally {
       setIsAddingSection(false);
     }
@@ -880,7 +882,7 @@ export default function AdminPage() {
       await setDoc(doc(db, "sections", sectionId), { active: !currentActive }, { merge: true });
     } catch (error) {
       console.error("Error toggling section:", error);
-      alert("Error updating section");
+      toast.error("Error updating section");
     }
   };
 
@@ -889,10 +891,10 @@ export default function AdminPage() {
 
     try {
       await deleteDoc(doc(db, "sections", sectionId));
-      alert("Section deleted");
+      toast.success("Section deleted");
     } catch (error) {
       console.error("Error deleting section:", error);
-      alert("Error deleting section");
+      toast.error("Error deleting section");
     }
   };
 
@@ -944,7 +946,7 @@ export default function AdminPage() {
 
       setDeleteUserUid(null);
       setDeleteConfirmText("");
-      alert(`User ${student.name || student.email} fully deleted (Auth + Firestore)`);
+      toast.success(`User ${student.name || student.email} fully deleted (Auth + Firestore)`);
     } catch (error) {
       console.error("Error deleting user:", error);
       alert("Error deleting user: " + error);
@@ -968,13 +970,13 @@ export default function AdminPage() {
       await deleteDoc(doc(db, "holidays", dateStr));
     } catch (error) {
       console.error("Error removing holiday:", error);
-      alert("Error removing holiday");
+      toast.error("Error removing holiday");
     }
   };
 
   const handleSemesterReset = async () => {
     if (resetConfirmText !== "RESET") {
-      alert("Please type RESET to confirm");
+      toast.warning("Please type RESET to confirm");
       return;
     }
 
@@ -1031,7 +1033,7 @@ export default function AdminPage() {
 
       await batch.commit();
 
-      alert("Semester reset completed successfully");
+      toast.success("Semester reset completed successfully");
       setShowResetConfirm(false);
       setResetConfirmText("");
     } catch (error) {

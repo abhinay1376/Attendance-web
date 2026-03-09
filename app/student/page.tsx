@@ -16,6 +16,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageTransition } from "@/components/page-transition";
+import { useToast } from "@/components/ui/toast";
 import { Badge } from "@/components/ui/badge";
 import { Collapsible } from "@/components/ui/collapsible";
 import { CalendarIcon, Info, LogOut, AlertTriangle, CheckCircle, XCircle, LayoutDashboard, BookOpen, Menu, X, TrendingUp, CalendarDays, Sun, Moon, MessageCircle } from "lucide-react";
@@ -89,6 +90,7 @@ export default function StudentPage() {
   const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("all");
   const [isDark, setIsDark] = useState(false);
   const [isBulkSubmitting, setIsBulkSubmitting] = useState<"PRESENT" | "ABSENT" | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     const saved = localStorage.getItem("theme");
@@ -294,7 +296,7 @@ export default function StudentPage() {
       console.error("Error unmarking attendance:", error);
       setAttendance(prevAttendance);
       setAllAttendanceDates(prevDates);
-      alert("Network error. Please try again.");
+      toast.error("Network error. Please try again.");
     } finally {
       setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
     }
@@ -311,7 +313,7 @@ export default function StudentPage() {
 
     // Validate date
     if (selectedDateStr > today && !allowFutureAttendance) {
-      alert("Cannot mark attendance for future dates.");
+      toast.warning("Cannot mark attendance for future dates.");
       return;
     }
     // Limit to 7 days ahead
@@ -319,12 +321,12 @@ export default function StudentPage() {
       const maxFutureDate = new Date();
       maxFutureDate.setDate(maxFutureDate.getDate() + 7);
       if (new Date(selectedDateStr) > maxFutureDate) {
-        alert("Cannot mark attendance more than 7 days in advance.");
+        toast.warning("Cannot mark attendance more than 7 days in advance.");
         return;
       }
     }
     if (holidays.has(selectedDateStr)) {
-      alert("Cannot mark attendance on a holiday.");
+      toast.warning("Cannot mark attendance on a holiday.");
       return;
     }
 
@@ -353,7 +355,7 @@ export default function StudentPage() {
       // Revert optimistic update on failure
       setAttendance(prevAttendance);
       setAllAttendanceDates(prevDates);
-      alert("Network error. Please try again.");
+      toast.error("Network error. Please try again.");
     } finally {
       setSubmitting((prev) => ({ ...prev, [slotKey]: false }));
     }
@@ -363,19 +365,19 @@ export default function StudentPage() {
     if (!user || slotsForDate.length === 0) return;
 
     if (selectedDateStr > today && !allowFutureAttendance) {
-      alert("Cannot mark attendance for future dates.");
+      toast.warning("Cannot mark attendance for future dates.");
       return;
     }
     if (selectedDateStr > today && allowFutureAttendance) {
       const maxFutureDate = new Date();
       maxFutureDate.setDate(maxFutureDate.getDate() + 7);
       if (new Date(selectedDateStr) > maxFutureDate) {
-        alert("Cannot mark attendance more than 7 days in advance.");
+        toast.warning("Cannot mark attendance more than 7 days in advance.");
         return;
       }
     }
     if (holidays.has(selectedDateStr)) {
-      alert("Cannot mark attendance on a holiday.");
+      toast.warning("Cannot mark attendance on a holiday.");
       return;
     }
 
@@ -408,7 +410,7 @@ export default function StudentPage() {
       console.error("Error bulk marking attendance:", error);
       setAttendance(prevAttendance);
       setAllAttendanceDates(prevDates);
-      alert("Network error. Please try again.");
+      toast.error("Network error. Please try again.");
     } finally {
       setIsBulkSubmitting(null);
     }
